@@ -1,0 +1,310 @@
+---
+title: Storage
+description: Manage databases, volumes, key-value stores, and queues as shared resources across your team and projects.
+---
+
+## Overview
+
+Storage in DevPush provides managed resources that can be shared across projects and environments. Storage resources are team-scoped and include databases (PostgreSQL), persistent volumes, key-value stores (Redis), and message queues (Redis).
+
+<Info>
+Storage resources are provisioned automatically when created and linked to projects via environment variables.
+</Info>
+
+## Storage Types
+
+DevPush supports four types of storage resources:
+
+### Database (PostgreSQL)
+
+Managed PostgreSQL database instances for your applications.
+
+```python
+# From app/models.py:638-642
+type: Mapped[str] = mapped_column(
+    SQLAEnum("database", "volume", "kv", "queue", name="storage_type"),
+    nullable=False,
+)
+```
+
+**Use cases:**
+- Application databases
+- Data persistence
+- Relational data storage
+
+**Connection details provided:**
+- `DATABASE_URL` - Full connection string
+- `DB_HOST` - Database host
+- `DB_PORT` - Database port
+- `DB_NAME` - Database name
+- `DB_USER` - Database username
+- `DB_PASSWORD` - Database password
+
+### Volume
+
+Persistent file storage mounted into your deployment containers.
+
+**Use cases:**
+- File uploads
+- Static assets
+- Shared data between deployments
+- Persistent logs
+
+**Configuration:**
+- Mount path is configurable per project
+- Survives deployment updates and rollbacks
+- Shared across environments if configured
+
+### Key-Value Store (Redis)
+
+Redis-based key-value storage for caching and sessions.
+
+**Use cases:**
+- Application caching
+- Session storage
+- Rate limiting
+- Feature flags
+
+**Connection details provided:**
+- `REDIS_URL` - Full Redis connection string
+- `REDIS_HOST` - Redis host
+- `REDIS_PORT` - Redis port
+- `REDIS_PASSWORD` - Redis password (if authentication enabled)
+
+### Queue (Redis)
+
+Redis-based message queues for background jobs and async processing.
+
+**Use cases:**
+- Background job processing
+- Task queues
+- Event streaming
+- Async workflows
+
+**Connection details provided:**
+- `QUEUE_URL` - Full queue connection string
+- `QUEUE_HOST` - Queue host
+- `QUEUE_PORT` - Queue port
+
+## Storage Structure
+
+Storage resources are represented in the database with the following fields:
+
+```python
+# From app/models.py:631-660
+class Storage(Base):
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), index=True)
+    type: Mapped[str] = mapped_column(
+        SQLAEnum("database", "volume", "kv", "queue", name="storage_type"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        SQLAEnum("pending", "active", "resetting", "deleted", name="storage_status"),
+        nullable=False,
+        default="pending",
+    )
+    config: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    error: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    team_id: Mapped[str] = mapped_column(ForeignKey("team.id"), index=True)
+```
+
+## Storage Statuses
+
+Storage resources progress through several states:
+
+| Status | Description |
+|--------|-------------|
+| `pending` | Resource is being provisioned |
+| `active` | Resource is ready and available |
+| `resetting` | Resource is being reset (data will be cleared) |
+| `deleted` | Resource has been removed |
+
+## Linking Storage to Projects
+
+Storage resources are linked to projects via the `StorageProject` relationship:
+
+```python
+# From app/models.py:702-729
+class StorageProject(Base):
+    storage_id: Mapped[str] = mapped_column(ForeignKey("storage.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("project.id"), index=True)
+    environment_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    secrets: Mapped[dict[str, object]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+```
+
+### Environment Scoping
+
+Storage can be linked to:
+- **All environments** - Available to every deployment
+- **Specific environments** - Only available to selected environments (e.g., production only)
+
+This is controlled via the `environment_ids` field.
+
+### Automatic Environment Variables
+
+When storage is linked to a project, connection details are automatically injected as environment variables into deployments. The exact variables depend on the storage type.
+
+## Creating Storage
+
+<Steps>
+  <Step title="Navigate to project storage">
+    From your project page, go to the Storage tab.
+  </Step>
+
+  <Step title="Create new storage">
+    Click "Create Storage" and select the storage type.
+  </Step>
+
+  <Step title="Configure storage">
+    - **Name**: Unique name within your team
+    - **Type**: database, volume, kv, or queue
+    - **Environments**: Select which environments can access this storage
+  </Step>
+
+  <Step title="Wait for provisioning">
+    Storage status will change from `pending` to `active` when ready.
+  </Step>
+
+  <Step title="Link to project">
+    Once active, link the storage to your project. Environment variables will be automatically injected on the next deployment.
+  </Step>
+</Steps>
+
+## Permission Model
+
+Storage follows team-based permissions:
+
+### Members
+- Create and manage their own storage resources
+- View team storage they created
+- Cannot access other members' storage
+
+### Admins
+- Manage all team storage resources
+- Link/unlink storage from any project
+- Reset or delete team storage
+
+### Owners
+- Full storage management (same as admins)
+- Delete team also removes all associated storage
+
+```python
+# From app/utils/access.py - Permission check example
+if not get_access(role, "admin"):
+    # Members can only see their own storage
+    query = query.where(Storage.created_by_user_id == current_user.id)
+```
+
+## Resetting Storage
+
+<Warning>
+Resetting storage will **permanently delete all data**. This action cannot be undone.
+</Warning>
+
+Storage resources can be reset to clear all data while keeping the resource configuration:
+
+1. Database reset drops and recreates the database
+2. Volume reset removes all files
+3. KV/Queue reset flushes all data
+
+The storage `status` changes to `resetting` during the operation, then returns to `active`.
+
+## Storage Lifecycle
+
+1. **Creation** - User creates storage, status is `pending`
+2. **Provisioning** - Background job provisions the resource
+3. **Active** - Storage is ready, can be linked to projects
+4. **Linking** - Attach storage to project with environment scope
+5. **Usage** - Deployments receive connection credentials automatically
+6. **Resetting** - Optional: clear data while keeping configuration
+7. **Deletion** - Remove storage and all data permanently
+
+## Best Practices
+
+<Tip>
+Create separate storage resources for different environments when dealing with production data.
+</Tip>
+
+### Naming Convention
+
+Use descriptive names that indicate purpose and environment:
+- `myapp-prod-db`
+- `myapp-staging-cache`
+- `myapp-shared-uploads`
+
+### Environment Isolation
+
+For sensitive production data:
+- Create dedicated storage for production environment
+- Scope storage to production environment only
+- Use separate storage for staging/preview to avoid data contamination
+
+### Database Migrations
+
+When using database storage:
+- Configure build commands to run migrations automatically
+- Use environment variables for connection strings
+- Test migrations in staging before production
+
+### Volume Management
+
+For persistent volumes:
+- Monitor disk usage regularly
+- Implement cleanup strategies for temporary files
+- Consider volume size when planning capacity
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Storage stuck in pending status">
+    If storage remains `pending` for more than a few minutes:
+    - Check worker logs: `scripts/compose.sh logs worker-jobs`
+    - Verify Docker has capacity to create new containers/volumes
+    - Check for errors in the storage `error` field
+  </Accordion>
+
+  <Accordion title="Connection refused errors">
+    If deployments cannot connect to storage:
+    - Verify storage status is `active`
+    - Check storage is linked to the correct project
+    - Ensure storage is scoped to the deployment's environment
+    - Verify environment variables are injected (check deployment logs)
+  </Accordion>
+
+  <Accordion title="Storage not appearing in project">
+    If storage doesn't show up when linking:
+    - Verify storage belongs to the same team as the project
+    - Check you have permission to view the storage (admin/owner or creator)
+    - Ensure storage status is `active`, not `pending` or `deleted`
+  </Accordion>
+
+  <Accordion title="Data lost after deployment">
+    If data disappears between deployments:
+    - Verify you're using persistent storage (not in-container storage)
+    - Check volume mount paths are consistent across deployments
+    - For databases, ensure you're not recreating the storage resource
+  </Accordion>
+</AccordionGroup>
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Projects" icon="folder-open" href="/concepts/deployments">
+    Learn how projects use storage resources
+  </Card>
+  
+  <Card title="Environments" icon="layer-group" href="/concepts/environments">
+    Understand environment-scoped storage access
+  </Card>
+  
+  <Card title="Teams" icon="users" href="/concepts/teams">
+    Manage storage permissions within teams
+  </Card>
+  
+  <Card title="Environment Variables" icon="key" href="/guides/environment-variables">
+    See how storage credentials are injected
+  </Card>
+</CardGroup>

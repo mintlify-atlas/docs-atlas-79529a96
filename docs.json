@@ -42,7 +42,8 @@
               "concepts/deployments",
               "concepts/environments",
               "concepts/teams",
-              "concepts/domains"
+              "concepts/domains",
+              "concepts/storage"
             ]
           },
           {

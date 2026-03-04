@@ -1,0 +1,91 @@
+{
+  "projectType": "saas",
+  "projectName": "DevPush",
+  "projectDescription": "An open-source and self-hostable alternative to Vercel for deploying any app with zero-downtime updates.",
+  "theme": "aspen",
+  "primaryColor": "#0c0c0c",
+  "lightColor": "#848484",
+  "darkColor": "#d7d7d7",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/deployments",
+              "concepts/environments",
+              "concepts/teams",
+              "concepts/domains"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/github-app",
+              "guides/custom-domains",
+              "guides/environment-variables",
+              "guides/runners",
+              "guides/ssl-certificates",
+              "guides/backups"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/monitoring",
+              "operations/scaling",
+              "operations/troubleshooting",
+              "operations/updating"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Configuration",
+            "pages": [
+              "reference/environment-variables",
+              "reference/scripts"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "reference/architecture",
+              "reference/data-model",
+              "reference/deployment-flow"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Git-based deployments with zero-downtime rollouts",
+    "Multi-language support (Python, Node.js, PHP, etc.)",
+    "Environment management with branch mapping",
+    "Real-time build and runtime logs",
+    "Team collaboration with role-based access control",
+    "Custom domains with automatic SSL certificates",
+    "Self-hosted and open source"
+  ],
+  "publicApiSurface": [
+    "GitHub webhook API",
+    "SSE endpoints for real-time updates",
+    "FastAPI web application",
+    "Installation scripts",
+    "Docker Compose orchestration"
+  ]
+}

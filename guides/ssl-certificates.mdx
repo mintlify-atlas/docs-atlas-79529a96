@@ -1,0 +1,492 @@
+---
+title: SSL Certificates
+description: Configure automatic SSL certificates with Let's Encrypt using HTTP-01 or DNS-01 challenge
+---
+
+DevPush automatically provisions SSL certificates for your deployments using Let's Encrypt. This guide covers both HTTP-01 (default) and DNS-01 (for wildcard certificates) challenge methods.
+
+## SSL certificate providers
+
+DevPush uses **Traefik** with **Let's Encrypt** ACME protocol to automatically issue and renew SSL certificates.
+
+### Supported challenge methods
+
+| Method | Use case | Requirements |
+|--------|----------|-------------|
+| **HTTP-01** | Standard certificates | Port 80 accessible |
+| **DNS-01** | Wildcard certificates (`*.example.com`) | DNS provider API credentials |
+
+## HTTP-01 challenge (default)
+
+The default configuration uses HTTP-01 challenge for single-domain certificates.
+
+### How it works
+
+1. DevPush requests a certificate from Let's Encrypt
+2. Let's Encrypt sends a challenge token
+3. Traefik serves the challenge token at `http://YOUR-DOMAIN/.well-known/acme-challenge/TOKEN`
+4. Let's Encrypt verifies the token via HTTP
+5. Certificate is issued and stored
+
+### Configuration
+
+No additional configuration required. From `compose/ssl-default.yml`:
+
+```yaml
+services:
+  traefik:
+    command:
+      - "--certificatesresolvers.le.acme.email=${LE_EMAIL}"
+      - "--certificatesresolvers.le.acme.storage=/etc/traefik/dynamic_conf/acme.json"
+      - "--certificatesresolvers.lehttp.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
+```
+
+### Requirements
+
+- Port 80 must be accessible from the internet
+- Domain DNS must point to your server
+- No firewall blocking HTTP traffic
+
+### Limitations
+
+- Cannot issue wildcard certificates
+- Requires port 80 to be open during challenge
+- Each subdomain needs a separate certificate
+
+## DNS-01 challenge
+
+DNS-01 challenge allows wildcard certificates and works behind firewalls.
+
+### How it works
+
+1. DevPush requests a certificate from Let's Encrypt
+2. Let's Encrypt sends a challenge token
+3. Traefik creates a TXT record via your DNS provider's API: `_acme-challenge.example.com`
+4. Let's Encrypt verifies the TXT record
+5. Certificate is issued (supports wildcards: `*.example.com`)
+
+### Supported DNS providers
+
+DevPush includes configurations for:
+
+- **Cloudflare** (recommended)
+- **Route53** (AWS)
+- **Google Cloud DNS**
+- **DigitalOcean**
+- **Azure DNS**
+
+## Configure DNS-01 with Cloudflare
+
+<Steps>
+  <Step title="Create a Cloudflare API token">
+    1. Log in to [Cloudflare Dashboard](https://dash.cloudflare.com/)
+    2. Go to **My Profile** → **API Tokens**
+    3. Click **Create Token**
+    4. Use the **Edit zone DNS** template
+    5. Set permissions:
+       - **Zone** → **DNS** → **Edit**
+    6. Select your zone (domain)
+    7. Click **Continue to summary** → **Create Token**
+    8. Copy the token (you won't see it again)
+  </Step>
+
+  <Step title="Add token to .env">
+    Edit `/var/lib/devpush/.env`:
+    
+    ```bash
+    CERT_CHALLENGE_PROVIDER=cloudflare
+    CF_DNS_API_TOKEN=your-cloudflare-api-token
+    ```
+  </Step>
+
+  <Step title="Restart DevPush">
+    Apply the configuration:
+    
+    ```bash
+    sudo systemctl restart devpush.service
+    ```
+    
+    Or manually:
+    
+    ```bash
+    sudo /opt/devpush/scripts/restart.sh
+    ```
+  </Step>
+
+  <Step title="Verify certificate issuance">
+    Check Traefik logs:
+    
+    ```bash
+    docker logs devpush-traefik-1 -f
+    ```
+    
+    Look for:
+    ```
+    time="2025-01-15T10:30:00Z" level=info msg="Certificates obtained for domains [example.com *.example.com]"
+    ```
+  </Step>
+</Steps>
+
+From `compose/ssl-cloudflare.yml`:
+
+```yaml
+services:
+  traefik:
+    command:
+      - "--certificatesresolvers.le.acme.dnschallenge=true"
+      - "--certificatesresolvers.le.acme.dnschallenge.provider=cloudflare"
+    environment:
+      - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
+```
+
+## Configure DNS-01 with Route53
+
+<Steps>
+  <Step title="Create IAM user with Route53 permissions">
+    1. Go to [AWS IAM Console](https://console.aws.amazon.com/iam/)
+    2. Create a new user (e.g., `devpush-acme`)
+    3. Attach policy:
+    
+    ```json
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "route53:GetChange",
+            "route53:ListHostedZones"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Effect": "Allow",
+          "Action": "route53:ChangeResourceRecordSets",
+          "Resource": "arn:aws:route53:::hostedzone/YOUR-ZONE-ID"
+        }
+      ]
+    }
+    ```
+    
+    4. Create access key and save credentials
+  </Step>
+
+  <Step title="Add credentials to .env">
+    Edit `/var/lib/devpush/.env`:
+    
+    ```bash
+    CERT_CHALLENGE_PROVIDER=route53
+    AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+    AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+    AWS_REGION=us-east-1
+    ```
+  </Step>
+
+  <Step title="Restart DevPush">
+    ```bash
+    sudo systemctl restart devpush.service
+    ```
+  </Step>
+</Steps>
+
+From `compose/ssl-route53.yml`:
+
+```yaml
+services:
+  traefik:
+    command:
+      - "--certificatesresolvers.le.acme.dnschallenge=true"
+      - "--certificatesresolvers.le.acme.dnschallenge.provider=route53"
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+```
+
+## Configure DNS-01 with Google Cloud DNS
+
+<Steps>
+  <Step title="Create a service account">
+    1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+    2. Navigate to **IAM & Admin** → **Service Accounts**
+    3. Click **Create Service Account**
+    4. Grant **DNS Administrator** role
+    5. Create and download JSON key
+  </Step>
+
+  <Step title="Add credentials to .env">
+    Edit `/var/lib/devpush/.env`:
+    
+    ```bash
+    CERT_CHALLENGE_PROVIDER=gcloud
+    GCE_PROJECT=your-project-id
+    GCE_SERVICE_ACCOUNT_FILE=/var/lib/devpush/gcloud-key.json
+    ```
+    
+    Copy the service account key:
+    ```bash
+    sudo cp ~/gcloud-key.json /var/lib/devpush/
+    sudo chmod 600 /var/lib/devpush/gcloud-key.json
+    ```
+  </Step>
+
+  <Step title="Restart DevPush">
+    ```bash
+    sudo systemctl restart devpush.service
+    ```
+  </Step>
+</Steps>
+
+## Configure DNS-01 with DigitalOcean
+
+<Steps>
+  <Step title="Generate API token">
+    1. Go to [DigitalOcean Control Panel](https://cloud.digitalocean.com/)
+    2. Navigate to **API** → **Tokens/Keys**
+    3. Click **Generate New Token**
+    4. Name: `DevPush ACME`
+    5. Scopes: **Write** access
+    6. Copy the token
+  </Step>
+
+  <Step title="Add token to .env">
+    Edit `/var/lib/devpush/.env`:
+    
+    ```bash
+    CERT_CHALLENGE_PROVIDER=digitalocean
+    DO_AUTH_TOKEN=your-digitalocean-api-token
+    ```
+  </Step>
+
+  <Step title="Restart DevPush">
+    ```bash
+    sudo systemctl restart devpush.service
+    ```
+  </Step>
+</Steps>
+
+## Configure DNS-01 with Azure DNS
+
+<Steps>
+  <Step title="Create service principal">
+    Using Azure CLI:
+    
+    ```bash
+    az ad sp create-for-rbac --name devpush-acme \
+      --role "DNS Zone Contributor" \
+      --scopes /subscriptions/YOUR-SUBSCRIPTION-ID/resourceGroups/YOUR-RG/providers/Microsoft.Network/dnszones/example.com
+    ```
+    
+    Note the output:
+    - `appId` → Client ID
+    - `password` → Client Secret
+    - `tenant` → Tenant ID
+  </Step>
+
+  <Step title="Add credentials to .env">
+    Edit `/var/lib/devpush/.env`:
+    
+    ```bash
+    CERT_CHALLENGE_PROVIDER=azure
+    AZURE_CLIENT_ID=your-client-id
+    AZURE_CLIENT_SECRET=your-client-secret
+    AZURE_TENANT_ID=your-tenant-id
+    AZURE_SUBSCRIPTION_ID=your-subscription-id
+    AZURE_RESOURCE_GROUP=your-resource-group
+    ```
+  </Step>
+
+  <Step title="Restart DevPush">
+    ```bash
+    sudo systemctl restart devpush.service
+    ```
+  </Step>
+</Steps>
+
+## Certificate storage and renewal
+
+### Storage location
+
+Certificates are stored in:
+
+```bash
+/var/lib/devpush/traefik/acme.json
+```
+
+This file contains:
+- Private keys
+- Certificates
+- ACME account information
+
+**Important**:
+- Backed up automatically by `scripts/backup.sh`
+- Permissions: `600` (read/write for owner only)
+- Never commit to version control
+
+### Automatic renewal
+
+Traefik automatically renews certificates:
+
+- **Renewal window**: 30 days before expiration
+- **Check frequency**: Every 24 hours
+- **Retry on failure**: Exponential backoff
+
+No manual intervention required.
+
+## Let's Encrypt rate limits
+
+Be aware of Let's Encrypt rate limits:
+
+| Limit | Value | Window |
+|-------|-------|--------|
+| Certificates per domain | 50 | 7 days |
+| Duplicate certificates | 5 | 7 days |
+| Failed validations | 5 | 1 hour |
+| New accounts | 10 | 3 hours per IP |
+
+**Recommendations**:
+- Use staging environment for testing: Set `ACME_STAGING=true` in `.env`
+- Don't delete `acme.json` unless necessary
+- Limit redeployments during development
+
+## Troubleshooting
+
+### Certificate not issuing
+
+**Check Traefik logs**:
+
+```bash
+docker logs devpush-traefik-1 --tail 100
+```
+
+Common errors:
+
+**"timeout during connect"**:
+- DNS not propagated
+- Firewall blocking port 80 (HTTP-01)
+- API credentials incorrect (DNS-01)
+
+**"too many certificates already issued"**:
+- Hit Let's Encrypt rate limit
+- Wait 7 days or use staging environment
+
+**"unauthorized"**:
+- API token lacks permissions
+- Token expired or revoked
+
+### DNS-01 challenge failing
+
+**Cloudflare**:
+```bash
+# Test API token
+curl -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+  -H "Authorization: Bearer YOUR-TOKEN"
+```
+
+**Route53**:
+```bash
+# Test credentials
+aws route53 list-hosted-zones --profile devpush
+```
+
+**Verify environment variables**:
+```bash
+sudo docker exec devpush-traefik-1 env | grep -E '(CF_|AWS_|GCE_|DO_|AZURE_)'
+```
+
+### Wildcard certificate not working
+
+**Cause**: Using HTTP-01 instead of DNS-01.
+
+**Solution**:
+1. Configure DNS-01 provider (see sections above)
+2. Set `CERT_CHALLENGE_PROVIDER` in `.env`
+3. Restart DevPush
+4. Delete old certificate:
+   ```bash
+   sudo rm /var/lib/devpush/traefik/acme.json
+   sudo systemctl restart devpush.service
+   ```
+
+### Certificate shows as invalid
+
+**Check certificate details**:
+```bash
+openssl s_client -connect example.com:443 -servername example.com < /dev/null 2>/dev/null | openssl x509 -text -noout
+```
+
+Common issues:
+- **Self-signed**: Certificate still provisioning (wait 2-5 minutes)
+- **Wrong domain**: DNS mismatch, verify A/CNAME records
+- **Expired**: Renewal failed, check Traefik logs
+
+### Rate limit exceeded
+
+**Use staging environment for testing**:
+
+Edit `/var/lib/devpush/.env`:
+
+```bash
+ACME_STAGING=true
+```
+
+Restart DevPush:
+```bash
+sudo systemctl restart devpush.service
+```
+
+**Remove staging certificates before production**:
+```bash
+sudo rm /var/lib/devpush/traefik/acme.json
+sudo sed -i '/ACME_STAGING/d' /var/lib/devpush/.env
+sudo systemctl restart devpush.service
+```
+
+## Best practices
+
+### Use DNS-01 for production
+
+- **Wildcard support**: `*.deploy.example.com` covers all deployments
+- **Fewer certificates**: One wildcard vs. many single-domain certs
+- **Better security**: No port 80 exposure required
+- **Works behind firewalls**: Only needs outbound HTTPS
+
+### Cloudflare recommended
+
+- Fastest DNS propagation (< 1 minute typically)
+- Free tier includes API access
+- Additional DDoS protection and CDN
+- Most reliable DNS-01 provider
+
+### Backup acme.json
+
+Included in DevPush backups:
+
+```bash
+sudo /opt/devpush/scripts/backup.sh
+```
+
+Manually backup:
+```bash
+sudo cp /var/lib/devpush/traefik/acme.json ~/acme.json.backup
+```
+
+### Monitor certificate expiration
+
+Check certificate expiration:
+
+```bash
+echo | openssl s_client -connect example.com:443 -servername example.com 2>/dev/null | openssl x509 -noout -dates
+```
+
+Traefik handles renewal automatically, but monitoring ensures:
+- Renewal process is working
+- No rate limit issues
+- API credentials still valid
+
+## Next steps
+
+- [Configure custom domains](/guides/custom-domains)
+- [Set up environment variables](/guides/environment-variables)
+- [Learn about backups](/guides/backups)

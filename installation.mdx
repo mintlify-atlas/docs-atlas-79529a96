@@ -1,0 +1,571 @@
+---
+title: Installation
+description: Complete installation guide for DevPush including production deployment and local development setup
+---
+
+This guide covers installing DevPush for production use and setting up a local development environment.
+
+## Production Installation
+
+Install DevPush on a production server for hosting your applications.
+
+### Prerequisites
+
+Before installing DevPush, ensure you have:
+
+<CardGroup cols={2}>
+  <Card title="Server" icon="server">
+    Ubuntu 20.04+ or Debian 11+ with SSH access and sudo privileges. A [Hetzner CPX31](https://devpu.sh/docs/guides/create-hetzner-server) works well.
+  </Card>
+  <Card title="Domain & DNS" icon="globe">
+    A domain name with DNS access. We recommend [Cloudflare](https://cloudflare.com).
+  </Card>
+  <Card title="GitHub Account" icon="github">
+    You'll create a GitHub App for authentication and repository access.
+  </Card>
+  <Card title="Email Service" icon="envelope">
+    A [Resend](https://resend.com) account or SMTP credentials for transactional emails.
+  </Card>
+</CardGroup>
+
+<Note>
+  DevPush is officially supported on Ubuntu 20.04+ and Debian 11+. Other distributions may work but are not tested.
+</Note>
+
+### Quick Install
+
+Run the automated installer on a fresh server:
+
+```bash
+curl -fsSL https://install.devpu.sh | sudo bash
+```
+
+The installation script will:
+
+<Steps>
+  <Step title="Install dependencies">
+    Installs Docker, Docker Compose, Git, and other required packages.
+  </Step>
+  
+  <Step title="Create system user">
+    Creates a `devpush` system user for running the services.
+  </Step>
+  
+  <Step title="Clone repository">
+    Clones the DevPush repository to `/opt/devpush`.
+  </Step>
+  
+  <Step title="Generate secrets">
+    Creates secure random values for `SECRET_KEY`, `ENCRYPTION_KEY`, and `POSTGRES_PASSWORD`.
+  </Step>
+  
+  <Step title="Create configuration">
+    Generates `/var/lib/devpush/.env` with auto-detected system settings.
+  </Step>
+  
+  <Step title="Install systemd service">
+    Sets up `devpush.service` for managing the application lifecycle.
+  </Step>
+</Steps>
+
+### Installation Options
+
+The installer supports several command-line options:
+
+```bash
+sudo bash install.sh [OPTIONS]
+```
+
+<ParamField path="--repo" type="string" default="https://github.com/hunvreus/devpush.git">
+  Git repository URL to clone
+</ParamField>
+
+<ParamField path="--ref" type="string" default="latest stable tag">
+  Git ref (branch/tag/commit) to install
+</ParamField>
+
+<ParamField path="--yes" type="flag">
+  Non-interactive mode, proceed without prompts
+</ParamField>
+
+<ParamField path="--no-telemetry" type="flag">
+  Disable anonymous usage telemetry
+</ParamField>
+
+<ParamField path="--verbose" type="flag">
+  Enable verbose output for debugging
+</ParamField>
+
+#### Example: Install Specific Version
+
+```bash
+curl -fsSL https://install.devpu.sh | sudo bash -s -- --ref v1.2.3
+```
+
+#### Example: Install from Fork
+
+```bash
+sudo bash install.sh --repo https://github.com/yourname/devpush.git --ref main
+```
+
+### Configuration
+
+After installation, configure DevPush by editing the environment file:
+
+```bash
+sudo nano /var/lib/devpush/.env
+```
+
+#### Required Configuration
+
+These variables must be configured before starting DevPush:
+
+<CodeGroup>
+```bash Domains & SSL
+# Domain for the DevPush application
+APP_HOSTNAME=devpush.example.com
+
+# Wildcard domain for deployments
+DEPLOY_DOMAIN=deploy.example.com
+
+# Email for Let's Encrypt notifications
+LE_EMAIL=admin@example.com
+
+# ACME challenge provider (default: HTTP-01)
+CERT_CHALLENGE_PROVIDER=default  # default|cloudflare|route53|gcloud|digitalocean|azure
+```
+
+```bash GitHub App
+# GitHub App credentials (see https://devpu.sh/gh-app)
+GITHUB_APP_ID=
+GITHUB_APP_NAME=
+GITHUB_APP_PRIVATE_KEY=  # PEM format, use \n for newlines
+GITHUB_APP_WEBHOOK_SECRET=
+GITHUB_APP_CLIENT_ID=
+GITHUB_APP_CLIENT_SECRET=
+```
+
+```bash Email
+# Email sender address
+EMAIL_SENDER_ADDRESS=noreply@example.com
+
+# Resend API key (or configure SMTP below)
+RESEND_API_KEY=
+
+# Optional: SMTP configuration
+# SMTP_HOST=
+# SMTP_PORT=587
+# SMTP_USERNAME=
+# SMTP_PASSWORD=
+```
+</CodeGroup>
+
+#### Auto-generated Configuration
+
+These values are automatically generated during installation:
+
+```bash
+# Secrets (auto-generated)
+SECRET_KEY=<random-hex-64>
+ENCRYPTION_KEY=<random-base64-32>
+POSTGRES_PASSWORD=<random-base64-24>
+
+# System (auto-detected)
+SERVER_IP=<public-ip>
+```
+
+<Warning>
+  Never commit the `.env` file to version control. It contains sensitive credentials.
+</Warning>
+
+#### Optional Configuration
+
+Customize DevPush behavior with these optional variables:
+
+<CodeGroup>
+```bash Resource Limits
+# Default CPU limit per deployment
+DEFAULT_CPUS=0.5
+
+# Maximum CPU override allowed
+MAX_CPUS=4.0
+
+# Default memory limit (MB)
+DEFAULT_MEMORY_MB=2048
+
+# Maximum memory override allowed
+MAX_MEMORY_MB=8192
+```
+
+```bash Timeouts
+# Background job timeout (seconds)
+JOB_TIMEOUT_SECONDS=320
+
+# Deployment timeout (seconds)
+DEPLOYMENT_TIMEOUT_SECONDS=300
+
+# Max retries per background job
+JOB_MAX_TRIES=3
+```
+
+```bash Authentication
+# Magic link validity (seconds)
+MAGIC_LINK_TTL_SECONDS=900
+
+# Auth cookie/JWT lifetime (days)
+AUTH_TOKEN_TTL_DAYS=30
+
+# Optional: Google OAuth
+# GOOGLE_CLIENT_ID=
+# GOOGLE_CLIENT_SECRET=
+```
+
+```bash Branding
+# Application display name
+APP_NAME=/dev/push
+
+# Application description
+APP_DESCRIPTION=
+
+# Email sender display name
+EMAIL_SENDER_NAME=/dev/push
+```
+</CodeGroup>
+
+For a complete list of configuration options, see the [Configuration Reference](/reference/environment-variables).
+
+### DNS Configuration
+
+Configure DNS records for your domains:
+
+<Steps>
+  <Step title="App hostname A record">
+    Point your app hostname to the server:
+    ```
+    A    devpush.example.com    →    YOUR_SERVER_IP
+    ```
+  </Step>
+  
+  <Step title="Wildcard deployment A record">
+    Point the wildcard domain to the server:
+    ```
+    A    *.deploy.example.com    →    YOUR_SERVER_IP
+    ```
+  </Step>
+  
+  <Step title="Verify propagation">
+    Wait for DNS to propagate (typically 5-10 minutes):
+    ```bash
+    dig +short devpush.example.com
+    dig +short app-name.deploy.example.com
+    ```
+  </Step>
+</Steps>
+
+### Starting DevPush
+
+Start the DevPush service using systemd:
+
+```bash
+sudo systemctl start devpush.service
+```
+
+Enable auto-start on boot:
+
+```bash
+sudo systemctl enable devpush.service
+```
+
+Check service status:
+
+```bash
+sudo systemctl status devpush.service
+```
+
+<Tip>
+  You can also use the helper scripts directly:
+  ```bash
+  sudo /opt/devpush/scripts/start.sh
+  sudo /opt/devpush/scripts/stop.sh
+  sudo /opt/devpush/scripts/restart.sh
+  ```
+</Tip>
+
+### Viewing Logs
+
+View service logs with journalctl:
+
+```bash
+# View recent logs
+sudo journalctl -u devpush.service -n 100
+
+# Follow logs in real-time
+sudo journalctl -u devpush.service -f
+
+# View logs from specific time
+sudo journalctl -u devpush.service --since "1 hour ago"
+```
+
+View component logs with Docker Compose:
+
+```bash
+cd /opt/devpush
+
+# View all logs
+sudo ./scripts/compose.sh logs
+
+# Follow specific service
+sudo ./scripts/compose.sh logs -f app
+
+# Multiple services
+sudo ./scripts/compose.sh logs -f app worker-jobs
+```
+
+### Updating DevPush
+
+Update to the latest version:
+
+```bash
+sudo /opt/devpush/scripts/update.sh
+```
+
+Update to a specific version:
+
+```bash
+sudo /opt/devpush/scripts/update.sh --ref v1.2.3
+```
+
+The update script will:
+- Fetch the specified version
+- Run database migrations
+- Restart services
+- Run version-specific upgrade hooks if needed
+
+<Warning>
+  Always backup your data before updating. Use `/opt/devpush/scripts/backup.sh` to create a backup.
+</Warning>
+
+## Development Setup
+
+Set up DevPush for local development on macOS or Linux.
+
+### Prerequisites
+
+- **Docker**: Docker Engine 20.10+ with Docker Compose v2+
+- **macOS**: [Colima](https://github.com/abiosoft/colima) works well as an alternative to Docker Desktop
+
+### Setup
+
+<Steps>
+  <Step title="Clone repository">
+    ```bash
+    git clone https://github.com/hunvreus/devpush.git
+    cd devpush
+    ```
+  </Step>
+  
+  <Step title="Create data directory">
+    ```bash
+    mkdir -p data
+    ```
+  </Step>
+  
+  <Step title="Copy environment template">
+    ```bash
+    cp .env.dev.example data/.env
+    ```
+  </Step>
+  
+  <Step title="Configure environment">
+    Edit `data/.env` with your GitHub App credentials and other settings:
+    ```bash
+    nano data/.env
+    ```
+    
+    At minimum, configure:
+    - `GITHUB_APP_ID`
+    - `GITHUB_APP_NAME`
+    - `GITHUB_APP_PRIVATE_KEY`
+    - `GITHUB_APP_WEBHOOK_SECRET`
+    - `GITHUB_APP_CLIENT_ID`
+    - `GITHUB_APP_CLIENT_SECRET`
+  </Step>
+  
+  <Step title="Start the stack">
+    ```bash
+    ./scripts/start.sh
+    ```
+    
+    The script auto-detects development mode on macOS and enables hot reloading.
+  </Step>
+</Steps>
+
+### Development Commands
+
+```bash
+# Start the stack
+./scripts/start.sh
+
+# Stop the stack
+./scripts/stop.sh
+
+# Restart services
+./scripts/restart.sh
+
+# View logs
+./scripts/compose.sh logs -f app
+
+# Run database migration
+./scripts/db-migrate.sh
+
+# Generate database migration
+./scripts/db-generate.sh
+
+# Clean all data (warning: destructive)
+./scripts/clean.sh
+```
+
+### Development Environment
+
+The development environment includes:
+
+- **Hot reloading**: Code changes trigger automatic restarts
+- **Local data**: All data stored in `./data/` directory
+- **Debug logging**: Enhanced logging for development
+- **No systemd**: Services managed via Docker Compose directly
+
+<Note>
+  Development mode is automatically detected on macOS. On Linux, set `DEVPUSH_ENV=development` to force development mode.
+</Note>
+
+### Accessing the Application
+
+The development server runs on `http://localhost:8000` by default. Access:
+
+- **Web UI**: http://localhost:8000
+- **API docs**: http://localhost:8000/docs
+- **Traefik dashboard**: http://localhost:8080
+
+## Uninstalling
+
+To completely remove DevPush from your server:
+
+```bash
+sudo /opt/devpush/scripts/uninstall.sh
+```
+
+This will:
+1. Create a backup in `/tmp/devpush-backup-*.tar.gz`
+2. Stop and remove all services
+3. Remove Docker containers, images, and volumes
+4. Remove the systemd service
+5. Remove application and data directories
+
+<Warning>
+  Uninstallation is destructive. The backup created during uninstall includes your data, but verify it before proceeding.
+</Warning>
+
+### Skip Backup
+
+To skip the automatic backup during uninstall:
+
+```bash
+sudo /opt/devpush/scripts/uninstall.sh --skip-backup
+```
+
+## Troubleshooting
+
+### Installation Issues
+
+<AccordionGroup>
+  <Accordion title="Docker installation fails">
+    If Docker installation fails, the installer attempts a fallback with different `containerd.io` versions. If that also fails:
+    
+    1. Check the install log: `cat /tmp/devpush-install.log`
+    2. Manually install Docker following [official docs](https://docs.docker.com/engine/install/)
+    3. Re-run the DevPush installer
+  </Accordion>
+  
+  <Accordion title="Port conflicts">
+    DevPush requires ports 80 and 443 for HTTP/HTTPS traffic. If these ports are in use:
+    
+    ```bash
+    # Check what's using the ports
+    sudo netstat -tulpn | grep ':80\|:443'
+    
+    # Stop conflicting services
+    sudo systemctl stop nginx  # example
+    sudo systemctl disable nginx
+    ```
+  </Accordion>
+  
+  <Accordion title="Permission denied errors">
+    Ensure you're running the installer with sudo:
+    ```bash
+    curl -fsSL https://install.devpu.sh | sudo bash
+    ```
+    
+    The installer must run as root to install system packages and create users.
+  </Accordion>
+</AccordionGroup>
+
+### Runtime Issues
+
+<AccordionGroup>
+  <Accordion title="Service won't start">
+    Check the service status and logs:
+    ```bash
+    sudo systemctl status devpush.service
+    sudo journalctl -u devpush.service -n 100
+    ```
+    
+    Common causes:
+    - Missing or invalid environment variables
+    - Docker daemon not running
+    - Port conflicts
+  </Accordion>
+  
+  <Accordion title="Database connection errors">
+    Ensure PostgreSQL is running:
+    ```bash
+    sudo /opt/devpush/scripts/compose.sh ps pgsql
+    sudo /opt/devpush/scripts/compose.sh logs pgsql
+    ```
+    
+    Try restarting the database:
+    ```bash
+    sudo /opt/devpush/scripts/restart.sh --components pgsql
+    ```
+  </Accordion>
+  
+  <Accordion title="SSL certificate issues">
+    Check Traefik logs:
+    ```bash
+    sudo /opt/devpush/scripts/compose.sh logs traefik
+    ```
+    
+    Common causes:
+    - DNS not propagated
+    - Let's Encrypt rate limits hit
+    - Firewall blocking port 80 (required for HTTP-01 challenge)
+    
+    For DNS-based challenges (Cloudflare, Route53, etc.), ensure the API credentials are correct in `.env`.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/reference/environment-variables">
+    Learn about all configuration options
+  </Card>
+  <Card title="GitHub App Setup" icon="github" href="/guides/github-app">
+    Create and configure your GitHub App
+  </Card>
+  <Card title="Deploy Projects" icon="rocket" href="/concepts/deployments">
+    Deploy your first project
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/reference/architecture">
+    Understand how DevPush works
+  </Card>
+</CardGroup>

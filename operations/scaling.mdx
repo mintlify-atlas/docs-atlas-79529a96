@@ -1,0 +1,418 @@
+---
+title: Scaling
+description: Scale DevPush horizontally and manage resource limits
+---
+
+DevPush is designed to scale from small single-server deployments to larger distributed setups.
+
+## Horizontal Scaling
+
+From `ARCHITECTURE.md:201`:
+
+> App and workers can scale horizontally behind Traefik. DB and Redis can be sized independently; cleanup tasks keep unused containers down.
+
+### Scaling the App
+
+The FastAPI app is stateless and can be scaled horizontally:
+
+```bash
+# Scale to 3 app instances
+./scripts/compose.sh up -d --scale app=3
+```
+
+**Requirements:**
+- Traefik handles load balancing automatically (via Docker provider)
+- Sessions use signed cookies (no Redis session storage needed)
+- All app instances must access the same PostgreSQL and Redis
+
+### Scaling Workers
+
+#### Jobs Worker
+
+The jobs worker handles background tasks and can be scaled:
+
+```bash
+# Scale to 2 workers
+./scripts/compose.sh up -d --scale worker-jobs=2
+```
+
+**Job distribution:**
+- ARQ (job queue) distributes jobs across all workers
+- Each worker polls Redis for jobs
+- Jobs are atomic and idempotent
+
+**Job configuration:**
+```bash
+JOB_TIMEOUT_SECONDS=320      # Max job execution time
+JOB_MAX_TRIES=3              # Retry attempts
+```
+
+#### Monitor Worker
+
+The monitor worker polls deployments every 2 seconds. Multiple instances can run:
+
+```bash
+# Scale to 2 monitors
+./scripts/compose.sh up -d --scale worker-monitor=2
+```
+
+**Concurrent monitoring:**
+- Each worker queries deployments independently
+- Probe state is tracked per-worker (in-memory)
+- Multiple probes on the same deployment are safe
+
+<Warning>
+  Scaling the monitor worker increases database and Docker API load. Monitor database query performance if you scale beyond 2 instances.
+</Warning>
+
+### Component-Based Management
+
+Restart specific components without affecting others:
+
+```bash
+# Restart only app instances
+./scripts/restart.sh --components app
+
+# Restart workers
+./scripts/restart.sh --components worker-jobs,worker-monitor
+
+# Multiple components
+./scripts/restart.sh --components app,worker-jobs
+```
+
+Valid components (`scripts/lib.sh`):
+- `app`
+- `worker-jobs`
+- `worker-monitor`
+- `pgsql`
+- `redis`
+- `traefik`
+- `loki`
+- `alloy`
+
+## Database Sizing
+
+### PostgreSQL Configuration
+
+DevPush uses PostgreSQL for all persistent data:
+
+```yaml
+# compose/base.yml
+pgsql:
+  image: postgres:16-alpine
+  volumes:
+    - devpush-db:/var/lib/postgresql/data
+```
+
+### Scaling PostgreSQL
+
+For production deployments:
+
+1. **Vertical scaling**: Increase CPU/memory for the database container
+2. **External database**: Point to a managed PostgreSQL instance
+
+```bash
+# In .env, update database connection
+POSTGRES_HOST=your-db-host.amazonaws.com
+POSTGRES_PORT=5432
+POSTGRES_DB=devpush
+POSTGRES_USER=devpush-app
+POSTGRES_PASSWORD=your-password
+```
+
+3. **Connection pooling**: Add pgBouncer for connection pooling
+
+### Database Maintenance
+
+```bash
+# Backup database
+./scripts/backup.sh
+
+# Vacuum (reclaim space)
+./scripts/compose.sh exec pgsql psql -U devpush-app -d devpush -c "VACUUM ANALYZE;"
+
+# Check database size
+./scripts/compose.sh exec pgsql psql -U devpush-app -d devpush -c "SELECT pg_size_pretty(pg_database_size('devpush'));"
+```
+
+## Redis Sizing
+
+### Redis Usage
+
+Redis serves two purposes:
+1. **ARQ job queue**: Deployment jobs and background tasks
+2. **Redis Streams**: Real-time updates for SSE endpoints
+
+```yaml
+# compose/base.yml
+redis:
+  image: redis:7-alpine
+  command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+```
+
+### Scaling Redis
+
+**Increase memory limit:**
+
+Edit `compose/override.yml` or `compose/override.dev.yml`:
+
+```yaml
+redis:
+  command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+```
+
+**External Redis:**
+
+```bash
+# In .env
+REDIS_URL=redis://your-redis-host:6379
+```
+
+**Monitor Redis:**
+
+```bash
+# Check memory usage
+./scripts/compose.sh exec redis redis-cli INFO memory
+
+# Monitor commands
+./scripts/compose.sh exec redis redis-cli MONITOR
+
+# Check queue length
+./scripts/compose.sh exec redis redis-cli LLEN arq:queue
+```
+
+## Resource Limits
+
+### Per-Deployment Limits
+
+DevPush enforces CPU and memory limits on runner containers.
+
+#### Default Limits
+
+```bash
+# In .env
+DEFAULT_CPUS=1.0           # CPU cores (fractional allowed)
+DEFAULT_MEMORY_MB=512      # Memory in megabytes
+```
+
+If not set, deployments run without resource limits.
+
+#### Maximum Overrides
+
+Allow users to customize limits up to a maximum:
+
+```bash
+# In .env (requires DEFAULT_CPUS and DEFAULT_MEMORY_MB)
+MAX_CPUS=4.0
+MAX_MEMORY_MB=2048
+```
+
+<Info>
+  `MAX_CPUS` and `MAX_MEMORY_MB` are only used when `DEFAULT_CPUS` and `DEFAULT_MEMORY_MB` are set.
+</Info>
+
+#### How Limits Are Applied
+
+From `app/workers/tasks/deployment.py`, container limits are set during creation:
+
+```python
+host_config = {
+    "CpuQuota": int(cpu_limit * 100000),  # CPU limit
+    "Memory": memory_limit * 1024 * 1024,  # Memory in bytes
+    "MemorySwap": memory_limit * 1024 * 1024,  # Disable swap
+}
+```
+
+### System Resource Planning
+
+**Calculate total resource needs:**
+
+```
+Total CPU = (app instances × 1 CPU) + (workers × 0.5 CPU) + (deployments × DEFAULT_CPUS)
+Total RAM = (app × 512MB) + (workers × 256MB) + (DB × 1GB) + (Redis × 512MB) + (deployments × DEFAULT_MEMORY_MB)
+```
+
+**Example for 10 concurrent deployments:**
+
+- App (2 instances): 2 CPU, 1 GB RAM
+- Workers (2 jobs, 1 monitor): 1.5 CPU, 768 MB RAM
+- PostgreSQL: 2 CPU, 2 GB RAM
+- Redis: 0.5 CPU, 512 MB RAM
+- Deployments (10 @ 1 CPU, 512 MB): 10 CPU, 5 GB RAM
+- **Total**: ~16 CPU, ~9.3 GB RAM
+
+<Warning>
+  Always leave headroom for system overhead and peak load. Reserve 20-30% additional capacity.
+</Warning>
+
+## Container Cleanup
+
+DevPush automatically cleans up inactive deployments to prevent resource exhaustion.
+
+### Cleanup Jobs
+
+From `app/workers/jobs.py`:
+
+- `cleanup_inactive_containers`: Removes old deployment containers
+- `delete_container`: Deferred container deletion after grace period
+
+### Grace Period
+
+Containers are not immediately deleted to allow logs to ship to Loki:
+
+```bash
+# In .env
+CONTAINER_DELETE_GRACE_SECONDS=3
+```
+
+This ensures all logs reach Loki before the container is removed.
+
+### Manual Cleanup
+
+```bash
+# Remove all stopped DevPush containers
+docker container prune --filter "label=com.docker.compose.project=devpush"
+
+# Remove unused runner containers
+docker container prune --filter "label=devpush.deployment.id"
+```
+
+## Network Scaling
+
+From `ARCHITECTURE.md:183`:
+
+### Networks
+
+- **devpush_default**: Public network (Traefik, app, Loki)
+- **devpush_internal**: Internal network (DB, Redis, Docker proxy)
+- **devpush_runner**: Runner network for deployed containers
+
+### Network Limits
+
+Docker creates subnets for each network. By default:
+
+- Each network supports ~65,534 IPs (172.x.x.x/16)
+- Runner containers connect to `devpush_runner` network
+
+**If you exceed network capacity:**
+
+1. Increase subnet size in `compose/base.yml`:
+
+```yaml
+networks:
+  devpush_runner:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/12  # Larger subnet
+```
+
+2. Prune old deployments more aggressively
+
+## Storage Scaling
+
+### Volume Management
+
+DevPush uses Docker volumes for persistent data:
+
+```bash
+# List volumes
+docker volume ls --filter "label=com.docker.compose.project=devpush"
+
+# Inspect volume
+docker volume inspect devpush-db
+
+# Check volume size
+du -sh /var/lib/docker/volumes/devpush-db/_data
+```
+
+### Deployment Storage
+
+User storage volumes are created in `DATA_DIR/storage/`:
+
+```
+DATA_DIR/storage/
+  <team-id>/
+    database/
+      <storage-name>/  # Mounted at /data/database/<name>
+    volume/
+      <storage-name>/  # Mounted at /data/volume/<name>
+```
+
+From `app/services/deployment.py:178`, storage is mounted via bind mounts:
+
+```python
+mounts.append(f"{host_path}:{container_path}")
+```
+
+### Storage Limits
+
+No built-in per-storage limits. Use filesystem quotas if needed:
+
+```bash
+# Enable quotas on mount (example for ext4)
+mount -o usrquota,grpquota /dev/sda1 /var/lib/devpush
+```
+
+## Monitoring Resource Usage
+
+### Real-Time Metrics
+
+```bash
+# All containers
+docker stats
+
+# DevPush stack only
+docker stats $(docker ps --filter "label=com.docker.compose.project=devpush" -q)
+```
+
+### System Resources
+
+```bash
+# CPU usage
+top
+
+# Memory usage
+free -h
+
+# Disk usage
+df -h
+
+# Docker disk usage
+docker system df
+```
+
+### Log Disk Usage
+
+Loki stores logs in a Docker volume:
+
+```bash
+# Check Loki volume size
+du -sh /var/lib/docker/volumes/loki-data/_data
+```
+
+Configure Loki retention in `compose/base.yml`:
+
+```yaml
+loki:
+  command:
+    - -config.file=/etc/loki/local-config.yaml
+    - -limits.retention-period=720h  # 30 days
+```
+
+## Performance Tuning
+
+### App Performance
+
+- **Workers**: Use Uvicorn with multiple workers (already configured in production)
+- **Database connections**: Increase pool size in `app/db.py` if needed
+
+### Worker Performance
+
+- **Job concurrency**: ARQ workers process jobs concurrently (adjust `max_jobs` in `app/workers/jobs.py`)
+- **Monitor polling**: Reduce interval if needed (currently 2 seconds)
+
+### Traefik Performance
+
+- **Connection limits**: Adjust in `compose/base.yml`
+- **Rate limiting**: Add middleware for rate limiting if needed

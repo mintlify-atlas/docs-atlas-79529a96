@@ -1,0 +1,495 @@
+---
+title: Updating
+description: Update DevPush to new versions safely
+---
+
+DevPush uses a Git-based update system that allows you to update to specific versions with rollback support.
+
+## Update Overview
+
+From `ARCHITECTURE.md:35`:
+
+> `update.sh` defaults to updating `app` only; use `--all`, `--components`, `--full`, or `scripts/upgrades/*.json` metadata to widen update scope.
+
+Updates are performed by:
+1. Fetching the target Git tag
+2. Running any version-specific upgrade hooks
+3. Performing rolling or full-stack updates
+4. Running database migrations
+
+## Basic Update
+
+### Update to Latest Version
+
+```bash
+sudo ./scripts/update.sh
+```
+
+This updates the **app only** to the latest stable tag with zero downtime.
+
+### Update to Specific Version
+
+```bash
+sudo ./scripts/update.sh --ref 0.4.5
+```
+
+### Update All Components
+
+```bash
+# Update app and workers
+sudo ./scripts/update.sh --all
+
+# Update specific components
+sudo ./scripts/update.sh --components app,worker-jobs
+
+# Full stack update (causes downtime)
+sudo ./scripts/update.sh --full
+```
+
+## Update Flags
+
+From `scripts/update.sh:17`:
+
+```bash
+--ref <tag>          # Git tag to update to (default: latest stable)
+--all                # Update app and workers (app,worker-jobs,worker-monitor)
+--components <csv>   # Comma-separated services to update
+--full               # Full stack update (down whole stack, then up)
+--backup             # Create backup before updating
+--no-migrate         # Skip database migrations
+--no-telemetry       # Don't send telemetry
+--yes, -y            # Non-interactive mode
+--verbose            # Verbose output
+```
+
+### Valid Components
+
+- `app`
+- `worker-jobs`
+- `worker-monitor`
+- `pgsql`
+- `redis`
+- `traefik`
+- `loki`
+- `alloy`
+
+## Update Process
+
+### How Update Works
+
+From `scripts/update.sh`:
+
+1. **Validate environment** - Check for uncommitted changes
+2. **Save current commit** - For rollback reference
+3. **Resolve target ref** - Fetch latest stable tag or use `--ref`
+4. **Fetch update** - Git fetch and checkout target
+5. **Run update-apply** - Execute updated `update-apply.sh` script
+6. **Apply upgrade hooks** - Run version-specific migrations (if any)
+7. **Update services** - Rolling or full-stack update
+8. **Run migrations** - Database schema updates (unless `--no-migrate`)
+
+### Current Commit Tracking
+
+From `scripts/update.sh:102`:
+
+```bash
+current_commit=$(git rev-parse HEAD)
+current_version=$(git describe --tags)
+```
+
+If update fails, rollback instructions are shown:
+
+```
+To rollback: cd /opt/devpush && git reset --hard <commit>
+```
+
+## Update Strategies
+
+### Rolling Update (Default)
+
+Updates services one at a time with zero downtime:
+
+```bash
+# App only (default)
+sudo ./scripts/update.sh
+
+# App and workers
+sudo ./scripts/update.sh --all
+```
+
+The app uses Docker's rolling update mechanism:
+- Start new container
+- Wait for health check
+- Stop old container
+
+### Full Stack Update
+
+Stops all services, then starts them (causes brief downtime):
+
+```bash
+sudo ./scripts/update.sh --full
+```
+
+Use when:
+- Updating database or core infrastructure
+- Major version upgrades
+- Changing network configuration
+
+### Component-Specific Update
+
+Update only specific components:
+
+```bash
+# Update workers without touching app
+sudo ./scripts/update.sh --components worker-jobs,worker-monitor
+
+# Update database
+sudo ./scripts/update.sh --components pgsql
+```
+
+## Database Migrations
+
+Migrations run automatically unless `--no-migrate` is specified.
+
+### Migration Process
+
+From `scripts/db-migrate.sh`, migrations:
+1. Wait for PostgreSQL to be ready
+2. Run Alembic migrations: `alembic upgrade head`
+3. Timeout after 60 seconds (default)
+
+### Skip Migrations
+
+```bash
+# Update without running migrations
+sudo ./scripts/update.sh --no-migrate
+
+# Run migrations later
+sudo ./scripts/db-migrate.sh
+```
+
+### Check Migration Status
+
+```bash
+# Current migration version
+./scripts/compose.sh exec app alembic current
+
+# Migration history
+./scripts/compose.sh exec app alembic history
+
+# Pending migrations
+./scripts/compose.sh exec app alembic upgrade head --sql
+```
+
+## Upgrade Hooks
+
+Version-specific upgrade hooks run automatically during updates.
+
+### How Hooks Work
+
+Hooks are located in `scripts/upgrades/X.Y.Z.sh` (e.g., `0.4.5.sh`).
+
+From upgrade metadata (`scripts/upgrades/X.Y.Z.json`):
+
+```json
+{
+  "version": "0.4.5",
+  "requires_hook": true,
+  "description": "Update registry catalog format"
+}
+```
+
+Hooks execute if:
+```
+current_version < hook_version <= target_version
+```
+
+### Example Upgrade Hooks
+
+From `scripts/upgrades/0.4.5.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Upgrade hook for version 0.4.5
+# Updates registry catalog format
+
+set -Eeuo pipefail
+
+# Hook code here...
+```
+
+Hooks must be **idempotent** (safe to run multiple times).
+
+## Backup and Restore
+
+### Create Backup Before Update
+
+```bash
+# Update with automatic backup
+sudo ./scripts/update.sh --backup
+
+# Or create backup manually
+sudo ./scripts/backup.sh
+```
+
+Backup includes:
+- Database dump
+- Data directory (`/var/lib/devpush`)
+- Code metadata (current commit, version)
+
+### Restore from Backup
+
+If update fails:
+
+```bash
+sudo ./scripts/restore.sh --archive /var/backups/devpush/backup-YYYYMMDD-HHMMSS.tar.gz
+```
+
+Restore flags:
+```bash
+--archive <file>    # Backup archive to restore
+--no-db             # Skip database restore
+--no-data           # Skip data directory restore
+--no-code           # Skip code restore
+--no-restart        # Don't restart after restore
+--no-backup         # Don't create backup before restore
+--remove-runners    # Remove all runner containers
+--yes               # Non-interactive mode
+```
+
+## Rollback
+
+### Manual Rollback
+
+If update fails, rollback to previous version:
+
+```bash
+# From update error message
+cd /opt/devpush && git reset --hard <previous-commit>
+
+# Restart services
+sudo ./scripts/restart.sh
+```
+
+### Rollback with Restore
+
+For complete rollback including data:
+
+```bash
+sudo ./scripts/restore.sh --archive /var/backups/devpush/backup-<timestamp>.tar.gz
+```
+
+## Update Verification
+
+### Check Version
+
+```bash
+# View current version
+cat /var/lib/devpush/version.json
+
+# Or from Git
+cd /opt/devpush && git describe --tags
+```
+
+### Verify Services
+
+```bash
+# Check all services are running
+sudo ./scripts/status.sh
+
+# Check service health
+sudo ./scripts/compose.sh ps
+
+# View recent logs
+sudo ./scripts/compose.sh logs --tail=50 app
+```
+
+### Test Application
+
+```bash
+# Check app health endpoint
+curl http://localhost/health
+
+# Check deployment creation
+# Use the web UI to trigger a test deployment
+```
+
+## Update Best Practices
+
+### Before Updating
+
+1. **Review changelog** - Check release notes for breaking changes
+2. **Create backup** - Use `--backup` flag
+3. **Check disk space** - Ensure sufficient space for new images
+4. **Plan maintenance window** - For `--full` updates
+5. **Test in staging** - If you have a staging environment
+
+### During Update
+
+1. **Monitor logs** - Watch for errors during update
+2. **Use verbose mode** - For debugging: `--verbose`
+3. **Document changes** - Note any manual steps required
+
+### After Update
+
+1. **Verify services** - Run `./scripts/status.sh`
+2. **Check logs** - Look for errors: `./scripts/compose.sh logs`
+3. **Test deployments** - Create a test deployment
+4. **Monitor resources** - Check CPU/memory usage
+
+## Common Update Issues
+
+### Uncommitted Changes
+
+**Error:**
+```
+Working directory has uncommitted changes.
+```
+
+**Solution:**
+```bash
+# Stash changes
+cd /opt/devpush
+git stash
+
+# Or discard (careful!)
+git reset --hard HEAD
+
+# Then retry update
+sudo ./scripts/update.sh
+```
+
+### Migration Failures
+
+**Error:**
+```
+Database migration failed
+```
+
+**Solution:**
+```bash
+# Check migration status
+./scripts/compose.sh exec app alembic current
+
+# Try manual migration
+sudo ./scripts/db-migrate.sh --verbose
+
+# If stuck, check PostgreSQL logs
+./scripts/compose.sh logs pgsql
+```
+
+### Docker Image Pull Failures
+
+**Error:**
+```
+Failed to pull image
+```
+
+**Solution:**
+```bash
+# Check Docker Hub connectivity
+docker pull hello-world
+
+# Check disk space
+df -h
+
+# Clean up old images
+docker image prune -a
+```
+
+### Service Won't Start After Update
+
+**Check logs:**
+```bash
+./scripts/compose.sh logs -f app
+```
+
+**Rollback:**
+```bash
+cd /opt/devpush && git reset --hard <previous-commit>
+sudo ./scripts/restart.sh
+```
+
+## Update Automation
+
+### Systemd Timer (Production)
+
+Create automatic update timer:
+
+```bash
+# /etc/systemd/system/devpush-update.timer
+[Unit]
+Description=DevPush Update Timer
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+# /etc/systemd/system/devpush-update.service
+[Unit]
+Description=DevPush Update
+
+[Service]
+Type=oneshot
+ExecStart=/opt/devpush/scripts/update.sh --backup --yes
+```
+
+```bash
+# Enable timer
+sudo systemctl enable --now devpush-update.timer
+```
+
+<Warning>
+  Automatic updates can cause unexpected issues. Test in staging first.
+</Warning>
+
+## Development Updates
+
+For development environments (macOS or `DEVPUSH_ENV=development`):
+
+```bash
+# Update code only (no services restart)
+cd devpush
+git pull origin main
+
+# Restart stack to apply changes
+./scripts/restart.sh
+
+# Or just restart app for code changes
+./scripts/restart.sh --components app
+```
+
+Development mode enables hot reload, so code changes often don't require restart.
+
+## Version Pinning
+
+Pin to specific version in production:
+
+```bash
+# Update to specific stable version
+sudo ./scripts/update.sh --ref 0.4.5
+
+# Verify version
+cat /var/lib/devpush/version.json
+```
+
+To stay on a version, don't run updates until ready to upgrade.
+
+## Update Checklist
+
+- [ ] Review release notes and changelog
+- [ ] Check current version: `git describe --tags`
+- [ ] Create backup: `./scripts/backup.sh`
+- [ ] Verify disk space: `df -h`
+- [ ] Run update: `./scripts/update.sh --backup`
+- [ ] Monitor logs during update
+- [ ] Verify services: `./scripts/status.sh`
+- [ ] Test deployment creation
+- [ ] Check application health
+- [ ] Document any issues
+- [ ] Clean up old Docker images if needed

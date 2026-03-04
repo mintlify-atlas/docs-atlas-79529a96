@@ -1,0 +1,427 @@
+---
+title: Environments
+description: Manage multiple environments like production, staging, and preview with branch mapping and environment-specific configuration.
+---
+
+## Overview
+
+Environments in DevPush allow you to run different versions of your application with separate configurations, domain mappings, and deployment workflows. Each project can have multiple environments, each with its own branch mapping and environment variables.
+
+<Info>
+By default, every project starts with a **production** environment that cannot be deleted or renamed.
+</Info>
+
+## Environment Structure
+
+Environments are stored as JSON objects within the project model:
+
+```python
+# From app/models.py:332-334
+environments: Mapped[list[dict[str, str]]] = mapped_column(
+    JSON, nullable=False, default=list
+)
+```
+
+Each environment contains:
+
+- `id`: Unique identifier (e.g., `"prod"`, auto-generated for custom environments)
+- `name`: Display name (e.g., `"Production"`, `"Staging"`)
+- `slug`: URL-safe identifier (e.g., `"production"`, `"staging"`)
+- `status`: Either `"active"` or `"deleted"` (soft delete)
+- Optional: branch mapping, domain configuration
+
+## Built-in Environments
+
+### Production
+
+The production environment is special:
+
+- **ID:** `"prod"` (hardcoded)
+- **Protected:** Cannot be deleted or renamed
+- **Simplified routing:** Uses `{project-slug}.{deploy-domain}` instead of `{project-slug}-env-production.{deploy-domain}`
+- **Rollback support:** Stores previous deployment for instant rollback
+
+```python
+# From app/models.py:455-460
+# Prevent production rename
+if environment_id == "prod" and (
+    env.get("name") != values.get("name")
+    or env.get("slug") != values.get("slug")
+):
+    raise ValueError("Cannot modify production environment")
+```
+
+<Note>
+Production environment aliases track the `previous_deployment_id` to enable one-click rollback to the last known good deployment.
+</Note>
+
+## Custom Environments
+
+You can create custom environments for staging, preview, development, or any other workflow:
+
+### Creating an Environment
+
+```python
+# From app/models.py:432-447
+def create_environment(self, name: str, slug: str, **kwargs) -> dict:
+    """Create a new environment with a unique ID"""
+    if self.has_active_environment_with_slug(slug):
+        raise ValueError(f"An active environment with slug '{slug}' already exists")
+    
+    env = {
+        "id": token_hex(4),  # 8-character hex ID
+        "name": name,
+        "slug": slug,
+        "status": "active",
+        **kwargs,
+    }
+    environments = self.environments.copy()
+    environments.append(env)
+    self.environments = environments
+    return env
+```
+
+### Updating an Environment
+
+Environments can be updated except for protected fields:
+
+```python
+# From app/models.py:449-493
+def update_environment(self, environment_id: str, values: dict) -> dict | None:
+    env = self.get_environment_by_id(environment_id)
+    if not env:
+        return None
+    
+    # Prevent production modification
+    if environment_id == "prod" and (
+        env.get("name") != values.get("name")
+        or env.get("slug") != values.get("slug")
+    ):
+        raise ValueError("Cannot modify production environment")
+    
+    # Check slug uniqueness
+    new_slug = values.get("slug")
+    if (
+        new_slug
+        and new_slug != env.get("slug")
+        and self.has_active_environment_with_slug(new_slug, exclude_id=environment_id)
+    ):
+        raise ValueError(f"An active environment with slug '{new_slug}' already exists")
+    
+    # Update environment
+    env_index = next(
+        i for i, e in enumerate(self.environments) if e["id"] == environment_id
+    )
+    old_slug = self.environments[env_index]["slug"]
+    
+    environments = self.environments.copy()
+    environments[env_index] = {**environments[env_index], **values}
+    self.environments = environments
+    
+    # Update env vars if slug changed
+    if new_slug and new_slug != old_slug:
+        env_vars = self.env_vars.copy()
+        for var in env_vars:
+            if var.get("environment") == old_slug:
+                var["environment"] = new_slug
+        self.env_vars = env_vars
+    
+    return environments[env_index]
+```
+
+### Deleting an Environment
+
+Environments are soft-deleted and cannot be permanently removed:
+
+```python
+# From app/models.py:495-519
+def delete_environment(self, environment_id: str | None) -> bool:
+    """Soft delete environment"""
+    if not environment_id:
+        return False
+    
+    if environment_id == "prod":
+        raise ValueError("Cannot delete production environment")
+    
+    env = self.get_environment_by_id(environment_id)
+    if not env:
+        return False
+    
+    # Remove env vars for this environment
+    env_vars = self.env_vars.copy()
+    env_vars = [var for var in env_vars if var.get("environment") != env["slug"]]
+    self.env_vars = env_vars
+    
+    # Mark environment as deleted
+    env_index = next(
+        i for i, e in enumerate(self.environments) if e["id"] == environment_id
+    )
+    environments = self.environments.copy()
+    environments[env_index] = {**environments[env_index], "status": "deleted"}
+    self.environments = environments
+    return True
+```
+
+<Warning>
+Deleting an environment also disables all custom domains configured for that environment.
+</Warning>
+
+## Environment Variables
+
+Environment variables can be scoped to specific environments or shared across all environments:
+
+### Global Variables
+
+Variables without an `environment` field apply to all environments:
+
+```json
+[
+  {
+    "key": "DATABASE_URL",
+    "value": "postgresql://..."
+  }
+]
+```
+
+### Environment-Specific Variables
+
+Variables with an `environment` field override global variables:
+
+```json
+[
+  {
+    "key": "API_URL",
+    "value": "https://api.example.com"
+  },
+  {
+    "key": "API_URL",
+    "value": "https://staging-api.example.com",
+    "environment": "staging"
+  }
+]
+```
+
+### Variable Resolution
+
+When deploying to an environment, variables are flattened with environment-specific values taking precedence:
+
+```python
+# From app/models.py:412-419
+def get_env_vars(self, environment: str) -> list[dict[str, str]]:
+    """Flattened env vars for a specific environment."""
+    # Start with global vars
+    env_vars = [var for var in self.env_vars if not var.get("environment")]
+    
+    # Override with environment-specific vars
+    for var in self.env_vars:
+        if var.get("environment") == environment:
+            env_vars = [v for v in env_vars if v["key"] != var["key"]]
+            env_vars.append(var)
+    return env_vars
+```
+
+<Info>
+Environment variables are encrypted at rest using Fernet encryption and snapshotted to each deployment.
+</Info>
+
+## Accessing Environments
+
+### By ID
+
+```python
+# From app/models.py:526-528
+def get_environment_by_id(self, env_id: str) -> dict | None:
+    """Get environment by ID"""
+    return next((env for env in self.environments if env["id"] == env_id), None)
+```
+
+### By Slug
+
+```python
+# From app/models.py:530-535
+def get_environment_by_slug(
+    self, slug: str, active_only: bool = True
+) -> dict | None:
+    """Get environment by slug"""
+    environments = self.active_environments if active_only else self.environments
+    return next((env for env in environments if env["slug"] == slug), None)
+```
+
+### Active Only
+
+```python
+# From app/models.py:521-524
+@property
+def active_environments(self) -> list[dict]:
+    """Get only active environments"""
+    return [env for env in self.environments if env.get("status") == "active"]
+```
+
+## Environment URLs
+
+Each environment has automatic URL generation:
+
+### Production URL
+
+```python
+# From app/models.py:577-589
+def get_environment_hostname(self, environment_slug: str) -> str:
+    """Get environment hostname"""
+    settings = get_settings()
+    if environment_slug == "production":
+        return self.hostname  # {project-slug}.{deploy-domain}
+    return f"{self.slug}-env-{environment_slug}.{settings.deploy_domain}"
+
+def get_environment_url(self, environment_slug: str) -> str:
+    """Get environment URL"""
+    settings = get_settings()
+    return (
+        f"{settings.url_scheme}://{self.get_environment_hostname(environment_slug)}"
+    )
+```
+
+**Examples:**
+- Production: `https://my-app-myteam.deploy.example.com`
+- Staging: `https://my-app-myteam-env-staging.deploy.example.com`
+- Development: `https://my-app-myteam-env-development.deploy.example.com`
+
+### Branch URLs
+
+Branch-specific URLs are also available for preview deployments:
+
+```python
+# From app/models.py:591-599
+def get_branch_hostname(self, branch: str) -> str:
+    """Get branch hostname"""
+    settings = get_settings()
+    return f"{self.slug}-branch-{branch}.{settings.deploy_domain}"
+
+def get_branch_url(self, branch: str) -> str:
+    """Get branch URL"""
+    settings = get_settings()
+    return f"{settings.url_scheme}://{self.get_branch_hostname(branch)}"
+```
+
+**Example:** `https://my-app-myteam-branch-feature-auth.deploy.example.com`
+
+## Branch Mapping
+
+Environments can be configured to automatically deploy specific branches:
+
+<CardGroup cols={2}>
+  <Card title="Production" icon="check-circle">
+    Map `main` or `master` branch to auto-deploy on push
+  </Card>
+  
+  <Card title="Staging" icon="flask">
+    Map `develop` or `staging` branch for pre-production testing
+  </Card>
+  
+  <Card title="Preview" icon="eye">
+    Map feature branches for ephemeral preview deployments
+  </Card>
+  
+  <Card title="Development" icon="code">
+    Map `dev` branch for continuous development builds
+  </Card>
+</CardGroup>
+
+## Common Environment Setups
+
+### Minimal Setup
+
+```
+Production → main branch → my-app.deploy.example.com
+```
+
+### Standard Setup
+
+```
+Production → main branch → my-app.deploy.example.com
+Staging → develop branch → my-app-env-staging.deploy.example.com
+```
+
+### Advanced Setup
+
+```
+Production → main branch → my-app.deploy.example.com
+Staging → develop branch → my-app-env-staging.deploy.example.com
+Development → dev branch → my-app-env-development.deploy.example.com
+Preview → feature/* branches → my-app-branch-{name}.deploy.example.com
+```
+
+## Environment Aliases
+
+DevPush automatically creates and maintains aliases for each environment:
+
+```python
+# From app/models.py:567-575
+async def get_environment_aliases(self, db: AsyncSession) -> dict[str, "Alias"]:
+    """Get environment aliases for this project"""
+    result = await db.execute(
+        select(Alias)
+        .join(Deployment, Alias.deployment_id == Deployment.id)
+        .where(Deployment.project_id == self.id, Alias.type == "environment")
+    )
+    aliases = result.scalars().all()
+    return {alias.value: alias for alias in aliases}
+```
+
+These aliases ensure traffic is always routed to the latest successful deployment for each environment.
+
+## Impact on Domains
+
+When you delete an environment, all custom domains configured for that environment are disabled:
+
+```python
+# From app/routers/project.py:1725-1745 (referenced in grep output)
+domains_result = await db.execute(
+    select(Domain).where(
+        Domain.project_id == project.id,
+        Domain.environment_id == environment_id,
+        Domain.status.in_(["active", "pending"]),
+    )
+)
+domains_to_disable = domains_result.scalars().all()
+
+for domain in domains_to_disable:
+    domain.status = "disabled"
+    domain.message = f"Environment {environment_id} was deleted"
+    domain.environment_id = None
+```
+
+<Warning>
+Disabled domains must be reconfigured with a new environment before they can be verified again.
+</Warning>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Clear Names" icon="tag">
+    Choose descriptive environment names that reflect their purpose (e.g., "Staging", "QA", "Demo")
+  </Card>
+  
+  <Card title="Match Git Workflow" icon="code-branch">
+    Align environments with your Git branching strategy (e.g., main → production, develop → staging)
+  </Card>
+  
+  <Card title="Isolate Secrets" icon="key">
+    Use environment-specific variables for API keys, database URLs, and other secrets
+  </Card>
+  
+  <Card title="Test Before Production" icon="vial">
+    Always test deployments in staging before promoting to production
+  </Card>
+</CardGroup>
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Deployments" icon="rocket" href="/concepts/deployments">
+    Learn about the deployment lifecycle and how environments are deployed
+  </Card>
+  
+  <Card title="Domains" icon="globe" href="/concepts/domains">
+    Configure custom domains for your environments
+  </Card>
+</CardGroup>

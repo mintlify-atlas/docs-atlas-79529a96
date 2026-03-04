@@ -1,0 +1,691 @@
+---
+title: Troubleshooting
+description: Diagnose and fix common DevPush issues
+---
+
+Common issues and how to resolve them.
+
+## Container Issues
+
+### Deployment Container Fails to Start
+
+**Symptoms:**
+- Deployment stuck in "deploy" status
+- Container exits immediately
+
+**Check container logs:**
+
+```bash
+# Get container ID from deployment
+DEPLOYMENT_ID="your-deployment-id"
+CONTAINER_ID=$(docker ps -a -q --filter "label=devpush.deployment.id=$DEPLOYMENT_ID")
+
+# View logs
+docker logs $CONTAINER_ID
+```
+
+**Common causes:**
+
+1. **Missing dependencies** - Check build logs for install errors
+2. **Port 8000 not exposed** - App must listen on port 8000
+3. **App exits immediately** - Ensure app runs as a long-lived process
+
+### Container Exit Code Meanings
+
+From `app/workers/monitor.py:94`, the monitor interprets exit codes:
+
+- **Exit 0**: App exited cleanly (unexpected - apps should keep running)
+  ```
+  Fix: Ensure your app doesn't exit after startup
+  ```
+
+- **Exit 1**: Startup crash
+  ```bash
+  # Check deployment logs for error details
+  docker logs $CONTAINER_ID | grep -i error
+  ```
+
+- **Exit 137**: Killed by system (OOM or manual stop)
+  ```
+  Fix: Increase memory limit in project settings
+  ```
+
+- **Other exit codes**: Generic failure - check logs
+
+### Container Not Responding on Port 8000
+
+**Symptoms:**
+- Deployment times out after 5 minutes (default `DEPLOYMENT_TIMEOUT_SECONDS=300`)
+- Monitor worker shows: "Timed out waiting for app to respond on port 8000"
+
+**Debugging:**
+
+```bash
+# Check if app is listening on port 8000 inside container
+docker exec $CONTAINER_ID netstat -tlnp | grep 8000
+
+# Test HTTP probe manually
+CONTAINER_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $CONTAINER_ID)
+curl http://$CONTAINER_IP:8000/
+```
+
+**Common fixes:**
+
+1. **Bind to 0.0.0.0, not 127.0.0.1:**
+   ```python
+   # Wrong - only accessible from inside container
+   app.run(host="127.0.0.1", port=8000)
+   
+   # Correct - accessible from Docker network
+   app.run(host="0.0.0.0", port=8000)
+   ```
+
+2. **Use environment variable PORT if available:**
+   ```python
+   port = int(os.getenv("PORT", 8000))
+   app.run(host="0.0.0.0", port=port)
+   ```
+
+### Container Stuck in "Removing" State
+
+```bash
+# Force remove container
+docker rm -f $CONTAINER_ID
+
+# If that fails, restart Docker daemon (production)
+sudo systemctl restart docker
+
+# Or restart Docker (development)
+# macOS: Restart Docker Desktop
+# Linux: sudo systemctl restart docker
+```
+
+## Log Issues
+
+### Logs Not Appearing in UI
+
+**Check Alloy (log shipper) is running:**
+
+```bash
+./scripts/compose.sh ps alloy
+./scripts/compose.sh logs alloy
+```
+
+**Check Loki is healthy:**
+
+```bash
+# Inside Docker network
+docker exec devpush-app-1 curl http://loki:3100/ready
+
+# Check Loki logs
+./scripts/compose.sh logs loki
+```
+
+**Verify container has correct labels:**
+
+From `app/workers/tasks/deployment.py`, containers must have these labels:
+
+```bash
+docker inspect $CONTAINER_ID --format '{{ json .Config.Labels }}' | jq
+```
+
+Required labels:
+- `devpush.deployment.id`
+- `devpush.project.id`
+- `devpush.environment.id`
+- `devpush.branch`
+
+**Query Loki directly:**
+
+```bash
+# Check if logs exist in Loki
+curl -G -s "http://loki:3100/loki/api/v1/query_range" \
+  --data-urlencode 'query={deployment_id="your-deployment-id"}' \
+  --data-urlencode 'limit=10'
+```
+
+### SSE Stream Disconnects
+
+**Symptoms:**
+- Logs stop streaming
+- "Connection lost" in browser console
+
+**Check Redis connectivity:**
+
+```bash
+# Ping Redis
+./scripts/compose.sh exec redis redis-cli ping
+
+# Check Redis streams
+./scripts/compose.sh exec redis redis-cli XINFO STREAM "stream:project:PROJECT_ID:deployment:DEPLOYMENT_ID:status"
+```
+
+**SSE timeout:**
+
+Streams expire after 900 seconds (15 minutes). From `app/routers/event.py:25`:
+
+```python
+STREAM_TTL = 900
+```
+
+Clients should reconnect automatically with the `Last-Event-ID` header.
+
+### Logs Show Wrong Timestamps
+
+Loki uses nanosecond timestamps. From `app/utils/log.py`, conversion happens in `epoch_nano_to_iso()`.
+
+```bash
+# Check system time is correct
+date
+
+# Check container time
+docker exec $CONTAINER_ID date
+```
+
+If times differ, sync system clock:
+
+```bash
+# Linux
+sudo timedatectl set-ntp true
+
+# macOS
+sudo sntp -sS time.apple.com
+```
+
+## Database Issues
+
+### Connection Refused
+
+**Symptoms:**
+- App fails to start with "connection refused"
+- Error: `FATAL: database "devpush" does not exist`
+
+**Check PostgreSQL is running:**
+
+```bash
+./scripts/compose.sh ps pgsql
+./scripts/compose.sh logs pgsql
+```
+
+**Verify database exists:**
+
+```bash
+./scripts/compose.sh exec pgsql psql -U devpush-app -d devpush -c "\l"
+```
+
+**Check connection string:**
+
+From `.env`:
+
+```bash
+POSTGRES_DB=devpush
+POSTGRES_USER=devpush-app
+POSTGRES_PASSWORD=your-password
+```
+
+Connection URL is automatically constructed in `app/config.py`.
+
+### Migration Failures
+
+**Symptoms:**
+- App fails to start
+- Error: "alembic_version table not found"
+
+**Run migrations manually:**
+
+```bash
+./scripts/db-migrate.sh
+```
+
+**Check migration status:**
+
+```bash
+# Inside app container
+./scripts/compose.sh exec app alembic current
+./scripts/compose.sh exec app alembic history
+```
+
+**Reset database (development only):**
+
+```bash
+# WARNING: This deletes all data
+./scripts/clean.sh --keep-docker --yes
+./scripts/start.sh
+```
+
+### Database Locks
+
+**Symptoms:**
+- Queries timeout
+- Error: "canceling statement due to lock timeout"
+
+**Check for locks:**
+
+```bash
+./scripts/compose.sh exec pgsql psql -U devpush-app -d devpush -c "
+  SELECT pid, usename, pg_blocking_pids(pid) as blocked_by, query 
+  FROM pg_stat_activity 
+  WHERE cardinality(pg_blocking_pids(pid)) > 0;
+"
+```
+
+**Kill blocking query (if safe):**
+
+```bash
+./scripts/compose.sh exec pgsql psql -U devpush-app -d devpush -c "SELECT pg_terminate_backend(PID);"
+```
+
+## Worker Issues
+
+### Jobs Not Processing
+
+**Check jobs worker is running:**
+
+```bash
+./scripts/compose.sh ps worker-jobs
+./scripts/compose.sh logs -f worker-jobs
+```
+
+**Check ARQ health:**
+
+```bash
+./scripts/compose.sh exec worker-jobs arq --check
+```
+
+**View job queue:**
+
+```bash
+# Check queue length
+./scripts/compose.sh exec redis redis-cli LLEN arq:queue
+
+# View queued jobs
+./scripts/compose.sh exec redis redis-cli LRANGE arq:queue 0 10
+```
+
+**Stuck jobs:**
+
+Jobs timeout after `JOB_TIMEOUT_SECONDS` (default: 320s). From `.env`:
+
+```bash
+JOB_TIMEOUT_SECONDS=320
+JOB_MAX_TRIES=3
+```
+
+Failed jobs are retried up to `JOB_MAX_TRIES` times.
+
+### Monitor Worker Not Detecting Deployments
+
+**Check monitor worker logs:**
+
+```bash
+./scripts/compose.sh logs -f worker-monitor
+```
+
+**Common issues:**
+
+1. **Database schema not ready:**
+   
+   From `app/workers/monitor.py:169`, the monitor waits for migrations:
+   
+   ```
+   Database schema not ready (no alembic_version); waiting for migrations...
+   ```
+   
+   Fix: Run `./scripts/db-migrate.sh`
+
+2. **Docker API not accessible:**
+   
+   ```bash
+   # Check Docker socket proxy
+   ./scripts/compose.sh ps docker-proxy
+   
+   # Test Docker API access
+   curl http://docker-proxy:2375/version
+   ```
+
+3. **Deployments in wrong state:**
+   
+   Monitor only checks deployments with `status=deploy` and `container_status=running`.
+   
+   ```sql
+   SELECT id, status, container_status FROM deployments WHERE status = 'deploy';
+   ```
+
+## Network Issues
+
+### Traefik Routing Failures
+
+**Check Traefik is running:**
+
+```bash
+./scripts/compose.sh ps traefik
+./scripts/compose.sh logs traefik
+```
+
+**Verify Traefik configuration:**
+
+```bash
+# Check dynamic config files
+ls -la $DATA_DIR/traefik/
+
+# View project Traefik config
+cat $DATA_DIR/traefik/project_<project-id>.yml
+```
+
+**Check router registration:**
+
+Access Traefik dashboard (if enabled) or check logs:
+
+```bash
+./scripts/compose.sh logs traefik | grep "router"
+```
+
+**Regenerate Traefik config:**
+
+From `app/services/deployment.py:250`, config is regenerated after deployment finalization. Trigger manually:
+
+```python
+# In Python shell or custom script
+await deployment_service.update_traefik_config(project, db, settings)
+```
+
+### DNS Resolution Issues
+
+**Verify DNS records:**
+
+```bash
+# Check A record for deployment domain
+dig +short my-project-env-prod.deploy.example.com
+
+# Should return server IP
+```
+
+**Check from server:**
+
+```bash
+# On the DevPush server
+curl -I https://my-project-env-prod.deploy.example.com
+```
+
+**Common issues:**
+
+1. **Missing wildcard DNS:** Ensure `*.deploy.example.com` points to server IP
+2. **DNS propagation:** Wait up to 48 hours for changes to propagate
+3. **Cloudflare proxy:** If using Cloudflare, ensure DNS-only (gray cloud) or configure SSL properly
+
+### SSL Certificate Issues
+
+**Check certificate provider:**
+
+From `.env`:
+
+```bash
+CERT_CHALLENGE_PROVIDER=default  # or cloudflare, route53, etc.
+```
+
+**View certificate errors:**
+
+```bash
+./scripts/compose.sh logs traefik | grep -i "acme"
+```
+
+**Check acme.json permissions:**
+
+```bash
+# Must be 600
+ls -la $DATA_DIR/traefik/acme.json
+
+# Fix if needed
+chmod 600 $DATA_DIR/traefik/acme.json
+```
+
+**Rate limiting:**
+
+Let's Encrypt has rate limits (50 certs/week). Check:
+
+```
+https://crt.sh/?q=%.example.com
+```
+
+## Resource Issues
+
+### Out of Memory (OOM)
+
+**Symptoms:**
+- Container exits with code 137
+- `dmesg` shows OOM killer messages
+
+**Check system memory:**
+
+```bash
+free -h
+dmesg | grep -i oom
+```
+
+**Check container memory usage:**
+
+```bash
+docker stats --no-stream
+```
+
+**Increase deployment memory limit:**
+
+From `.env`:
+
+```bash
+DEFAULT_MEMORY_MB=1024  # Increase from 512
+MAX_MEMORY_MB=2048      # Allow users to override up to 2GB
+```
+
+**Free up memory:**
+
+```bash
+# Clean up stopped containers
+docker container prune -f
+
+# Clean up unused images
+docker image prune -a -f
+
+# Clean up volumes (careful!)
+docker volume prune -f
+```
+
+### Disk Space Full
+
+**Check disk usage:**
+
+```bash
+df -h
+docker system df
+```
+
+**Clean up Docker resources:**
+
+```bash
+# Remove unused containers, images, networks, volumes
+docker system prune -a --volumes -f
+
+# Or selectively:
+docker container prune -f
+docker image prune -a -f
+docker volume prune -f
+```
+
+**Check log sizes:**
+
+```bash
+# Loki logs
+du -sh /var/lib/docker/volumes/loki-data/_data
+
+# Container logs
+du -sh /var/lib/docker/containers/*/*-json.log | sort -h | tail -20
+```
+
+**Truncate large container logs:**
+
+```bash
+truncate -s 0 /var/lib/docker/containers/<container-id>/<container-id>-json.log
+```
+
+## Stack Management Issues
+
+### Stack Won't Start
+
+**Check status:**
+
+```bash
+./scripts/status.sh
+```
+
+**View all logs:**
+
+```bash
+./scripts/compose.sh logs --tail=100
+```
+
+**Check Docker daemon:**
+
+```bash
+# Linux
+sudo systemctl status docker
+
+# macOS
+# Check Docker Desktop is running
+```
+
+**Start with verbose output:**
+
+```bash
+./scripts/start.sh --verbose
+```
+
+### Stack Won't Stop
+
+**Try graceful stop:**
+
+```bash
+./scripts/stop.sh
+```
+
+**Force stop all containers:**
+
+```bash
+./scripts/stop.sh --hard
+```
+
+**Manually stop containers:**
+
+```bash
+# Get all DevPush containers
+docker ps -a --filter "label=com.docker.compose.project=devpush" -q
+
+# Force stop
+docker stop $(docker ps -a --filter "label=com.docker.compose.project=devpush" -q)
+
+# Force remove
+docker rm -f $(docker ps -a --filter "label=com.docker.compose.project=devpush" -q)
+```
+
+### Service Fails to Restart
+
+**Check component-specific issues:**
+
+```bash
+# Restart single component
+./scripts/restart.sh --components app
+
+# View component logs
+./scripts/compose.sh logs -f app
+```
+
+**Common per-service issues:**
+
+- **app**: Check `.env` file, migrations, database connection
+- **worker-jobs**: Check Redis connection, ARQ configuration
+- **worker-monitor**: Check Docker API access, database schema
+- **pgsql**: Check volume permissions, disk space
+- **redis**: Check memory limits, disk space
+- **traefik**: Check acme.json permissions, SSL provider config
+
+## Debugging Tools
+
+### Enable Verbose Logging
+
+```bash
+# In .env
+LOG_LEVEL=DEBUG  # Default: WARNING
+```
+
+Restart affected services:
+
+```bash
+./scripts/restart.sh --components app,worker-jobs,worker-monitor
+```
+
+### Access Container Shell
+
+```bash
+# App container
+./scripts/compose.sh exec app /bin/bash
+
+# Deployment container
+docker exec -it $CONTAINER_ID /bin/bash
+
+# Database
+./scripts/compose.sh exec pgsql psql -U devpush-app -d devpush
+```
+
+### Inspect Container Configuration
+
+```bash
+# Full container config
+docker inspect $CONTAINER_ID
+
+# Environment variables
+docker inspect $CONTAINER_ID --format '{{ json .Config.Env }}' | jq
+
+# Networks
+docker inspect $CONTAINER_ID --format '{{ json .NetworkSettings.Networks }}' | jq
+
+# Labels
+docker inspect $CONTAINER_ID --format '{{ json .Config.Labels }}' | jq
+```
+
+### Check Docker Events
+
+```bash
+# Monitor Docker events in real-time
+docker events --filter "label=com.docker.compose.project=devpush"
+
+# Or for specific deployment
+docker events --filter "label=devpush.deployment.id=$DEPLOYMENT_ID"
+```
+
+## Getting Help
+
+### Collect Diagnostic Information
+
+Before reporting issues, collect:
+
+```bash
+# System info
+uname -a
+docker version
+docker compose version
+
+# Stack status
+./scripts/status.sh
+
+# Service logs (last 100 lines)
+./scripts/compose.sh logs --tail=100 > devpush-logs.txt
+
+# Environment (redact secrets!)
+cat $DATA_DIR/.env | grep -v "PASSWORD\|SECRET\|KEY" > devpush-env.txt
+```
+
+### Common Log Locations
+
+- **Script logs**: `$TMPDIR/devpush-*.log` (temporary)
+- **Docker logs**: `docker logs <container>` or `./scripts/compose.sh logs <service>`
+- **System logs** (production): `/var/log/devpush/`
+- **Systemd logs** (production): `journalctl -u devpush.service`

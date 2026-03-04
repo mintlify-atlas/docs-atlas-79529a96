@@ -1,0 +1,560 @@
+---
+title: Backups & Restore
+description: Create and restore backups of your DevPush instance including database, data directory, and configuration
+---
+
+DevPush includes built-in backup and restore functionality to protect your data. This guide covers creating backups, scheduling automatic backups, and restoring from backup archives.
+
+## What gets backed up
+
+A DevPush backup includes:
+
+1. **Database dump**: Complete PostgreSQL dump with all projects, deployments, users, and settings
+2. **Data directory**: All files from `/var/lib/devpush` including:
+   - Uploaded files
+   - Traefik configuration and SSL certificates
+   - Registry catalog and overrides
+   - Environment file (`.env`)
+3. **Metadata**: Backup timestamp, hostname, IP address, and paths
+
+## Create a backup
+
+### Manual backup
+
+Create a backup manually:
+
+```bash
+sudo /opt/devpush/scripts/backup.sh
+```
+
+This creates a compressed archive:
+
+```
+/var/lib/devpush/backups/devpush-YYYYMMDD-HHMMSS.tar.gz
+```
+
+### Custom output location
+
+Specify a custom output path:
+
+```bash
+sudo /opt/devpush/scripts/backup.sh --output /path/to/backup.tar.gz
+```
+
+### Verbose output
+
+Enable detailed logging:
+
+```bash
+sudo /opt/devpush/scripts/backup.sh --verbose
+```
+
+## Backup script details
+
+From `scripts/backup.sh`, the backup process:
+
+<Steps>
+  <Step title="Verify prerequisites">
+    - Check Docker is accessible
+    - Verify PostgreSQL container is running
+    - Ensure data directory exists
+  </Step>
+
+  <Step title="Create temporary workspace">
+    ```bash
+    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/devpush-backup.XXXXXX")"
+    ```
+  </Step>
+
+  <Step title="Copy data directory">
+    ```bash
+    # From scripts/backup.sh:65-69
+    tar -C "$DATA_DIR" -cf - . | tar -C "$tmp_dir/data" -xf -
+    ```
+    
+    Preserves permissions, ownership, and directory structure.
+  </Step>
+
+  <Step title="Create database dump">
+    ```bash
+    # From scripts/backup.sh:88-91
+    env "PGPASSWORD=$pg_password" \
+      docker compose exec -T pgsql \
+      pg_dump -U "$pg_user" -d "$pg_db" --no-owner --no-privileges \
+      > "$tmp_dir/db/pgdump.sql"
+    ```
+    
+    Uses `pg_dump` with:
+    - `--no-owner`: Skip ownership commands
+    - `--no-privileges`: Skip grant/revoke commands
+  </Step>
+
+  <Step title="Generate metadata">
+    ```bash
+    # From scripts/backup.sh:101-111
+    cat >"$tmp_dir/metadata.json" <<JSON
+    {
+      "created_at": "$(date -Iseconds)",
+      "environment": "$ENVIRONMENT",
+      "data_dir": "$DATA_DIR",
+      "app_dir": "$APP_DIR",
+      "host_name": "$host_name",
+      "host_ip": "$host_ip",
+      "archive_path": "$output_path"
+    }
+    JSON
+    ```
+  </Step>
+
+  <Step title="Create compressed archive">
+    ```bash
+    # From scripts/backup.sh:116
+    tar -czf "$output_path" -C "$tmp_dir" data db metadata.json
+    ```
+    
+    Creates a gzip-compressed tar archive.
+  </Step>
+
+  <Step title="Verify archive integrity">
+    ```bash
+    # From scripts/backup.sh:118-121
+    tar -tzf "$output_path" >/dev/null
+    ```
+    
+    Ensures the archive is valid before cleanup.
+  </Step>
+</Steps>
+
+## Backup archive structure
+
+A backup archive contains:
+
+```
+devpush-20260304-143022.tar.gz
+├── data/                    # Full data directory
+│   ├── .env                # Environment configuration
+│   ├── traefik/            # Traefik config and SSL certs
+│   │   └── acme.json       # Let's Encrypt certificates
+│   ├── registry/           # Runner catalog and overrides
+│   │   ├── catalog.json
+│   │   └── overrides.json
+│   ├── uploads/            # Uploaded files (avatars, etc.)
+│   └── logs/               # Application logs
+├── db/
+│   └── pgdump.sql          # PostgreSQL database dump
+└── metadata.json            # Backup metadata
+```
+
+## Restore from backup
+
+### Prerequisites
+
+- DevPush must be installed (use `scripts/install.sh` on a fresh server)
+- Backup archive file accessible on the server
+- Root/sudo access
+
+### Restore process
+
+<Steps>
+  <Step title="Stop DevPush">
+    ```bash
+    sudo systemctl stop devpush.service
+    ```
+  </Step>
+
+  <Step title="Run restore script">
+    ```bash
+    sudo /opt/devpush/scripts/restore.sh --archive /path/to/backup.tar.gz
+    ```
+  </Step>
+
+  <Step title="Confirm restore">
+    The script will prompt for confirmation before overwriting data:
+    
+    ```
+    This will restore from: /path/to/backup.tar.gz
+    Created: 2026-03-04T14:30:22+00:00
+    
+    This will OVERWRITE:
+      - Database
+      - Data directory
+    
+    Continue? [y/N]
+    ```
+    
+    Type `y` to proceed.
+  </Step>
+
+  <Step title="Wait for completion">
+    The restore process:
+    - Extracts backup archive
+    - Restores data directory
+    - Drops and recreates database
+    - Imports database dump
+    - Restarts DevPush
+  </Step>
+
+  <Step title="Verify restoration">
+    Check that DevPush is running:
+    
+    ```bash
+    sudo systemctl status devpush.service
+    ```
+    
+    Visit your DevPush URL and verify data is restored.
+  </Step>
+</Steps>
+
+### Restore options
+
+The restore script supports selective restoration:
+
+```bash
+# Skip database restore (data directory only)
+sudo /opt/devpush/scripts/restore.sh --archive backup.tar.gz --no-db
+
+# Skip data directory restore (database only)
+sudo /opt/devpush/scripts/restore.sh --archive backup.tar.gz --no-data
+
+# Skip automatic restart
+sudo /opt/devpush/scripts/restore.sh --archive backup.tar.gz --no-restart
+
+# Skip creating a backup before restore
+sudo /opt/devpush/scripts/restore.sh --archive backup.tar.gz --no-backup
+
+# Remove runner containers before restore
+sudo /opt/devpush/scripts/restore.sh --archive backup.tar.gz --remove-runners
+
+# Non-interactive mode (skip confirmation)
+sudo /opt/devpush/scripts/restore.sh --archive backup.tar.gz --yes
+```
+
+## Automated backups
+
+### Using cron
+
+Schedule daily backups with cron:
+
+```bash
+# Edit root crontab
+sudo crontab -e
+```
+
+Add a daily backup at 2 AM:
+
+```cron
+0 2 * * * /opt/devpush/scripts/backup.sh --output /var/lib/devpush/backups/devpush-$(date +\%Y\%m\%d).tar.gz
+```
+
+### Using systemd timer
+
+Create a systemd timer for more control:
+
+**Create backup service** (`/etc/systemd/system/devpush-backup.service`):
+
+```ini
+[Unit]
+Description=DevPush Backup Service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/devpush/scripts/backup.sh
+User=root
+```
+
+**Create timer** (`/etc/systemd/system/devpush-backup.timer`):
+
+```ini
+[Unit]
+Description=DevPush Daily Backup Timer
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+**Enable and start**:
+
+```bash
+sudo systemctl enable devpush-backup.timer
+sudo systemctl start devpush-backup.timer
+
+# Check status
+sudo systemctl status devpush-backup.timer
+
+# List upcoming runs
+sudo systemctl list-timers devpush-backup.timer
+```
+
+## Backup retention
+
+### Clean up old backups
+
+Create a cleanup script to keep only recent backups:
+
+```bash
+#!/bin/bash
+# Keep only last 30 days of backups
+find /var/lib/devpush/backups -name "devpush-*.tar.gz" -mtime +30 -delete
+```
+
+Add to cron:
+
+```cron
+# Clean up old backups weekly on Sunday at 3 AM
+0 3 * * 0 find /var/lib/devpush/backups -name "devpush-*.tar.gz" -mtime +30 -delete
+```
+
+### Recommended retention policy
+
+- **Daily backups**: Keep 7 days
+- **Weekly backups**: Keep 4 weeks
+- **Monthly backups**: Keep 12 months
+
+Example implementation:
+
+```bash
+#!/bin/bash
+BACKUP_DIR=/var/lib/devpush/backups
+DATE=$(date +%Y%m%d)
+DAY_OF_WEEK=$(date +%u)  # 1-7 (Monday-Sunday)
+DAY_OF_MONTH=$(date +%d)
+
+# Create backup
+/opt/devpush/scripts/backup.sh --output "$BACKUP_DIR/devpush-$DATE.tar.gz"
+
+# Create weekly backup on Sunday
+if [ "$DAY_OF_WEEK" -eq 7 ]; then
+  cp "$BACKUP_DIR/devpush-$DATE.tar.gz" "$BACKUP_DIR/weekly-$DATE.tar.gz"
+fi
+
+# Create monthly backup on the 1st
+if [ "$DAY_OF_MONTH" -eq 1 ]; then
+  cp "$BACKUP_DIR/devpush-$DATE.tar.gz" "$BACKUP_DIR/monthly-$DATE.tar.gz"
+fi
+
+# Clean up
+find "$BACKUP_DIR" -name "devpush-*.tar.gz" -mtime +7 -delete
+find "$BACKUP_DIR" -name "weekly-*.tar.gz" -mtime +28 -delete
+find "$BACKUP_DIR" -name "monthly-*.tar.gz" -mtime +365 -delete
+```
+
+## Off-site backups
+
+### Upload to S3
+
+Backup to AWS S3 for off-site storage:
+
+```bash
+#!/bin/bash
+BACKUP_FILE=/var/lib/devpush/backups/devpush-$(date +%Y%m%d).tar.gz
+S3_BUCKET=my-devpush-backups
+
+# Create backup
+/opt/devpush/scripts/backup.sh --output "$BACKUP_FILE"
+
+# Upload to S3
+aws s3 cp "$BACKUP_FILE" "s3://$S3_BUCKET/$(basename $BACKUP_FILE)"
+
+# Remove local copy after successful upload
+if [ $? -eq 0 ]; then
+  rm "$BACKUP_FILE"
+fi
+```
+
+### Upload to Backblaze B2
+
+```bash
+#!/bin/bash
+BACKUP_FILE=/var/lib/devpush/backups/devpush-$(date +%Y%m%d).tar.gz
+
+# Create backup
+/opt/devpush/scripts/backup.sh --output "$BACKUP_FILE"
+
+# Upload to B2
+b2 upload-file my-bucket-name "$BACKUP_FILE" "backups/$(basename $BACKUP_FILE)"
+
+# Remove local copy
+rm "$BACKUP_FILE"
+```
+
+### Rsync to remote server
+
+```bash
+#!/bin/bash
+BACKUP_FILE=/var/lib/devpush/backups/devpush-$(date +%Y%m%d).tar.gz
+REMOTE_HOST=backup.example.com
+REMOTE_PATH=/backups/devpush/
+
+# Create backup
+/opt/devpush/scripts/backup.sh --output "$BACKUP_FILE"
+
+# Copy to remote server
+rsync -avz "$BACKUP_FILE" "$REMOTE_HOST:$REMOTE_PATH"
+```
+
+## Disaster recovery
+
+### Full server rebuild
+
+<Steps>
+  <Step title="Provision new server">
+    Create a new Ubuntu/Debian server with the same specifications.
+  </Step>
+
+  <Step title="Install DevPush">
+    ```bash
+    curl -fsSL https://install.devpu.sh | sudo bash
+    ```
+  </Step>
+
+  <Step title="Transfer backup file">
+    Copy your backup to the new server:
+    
+    ```bash
+    scp devpush-backup.tar.gz root@new-server:/root/
+    ```
+  </Step>
+
+  <Step title="Restore backup">
+    ```bash
+    sudo /opt/devpush/scripts/restore.sh --archive /root/devpush-backup.tar.gz --yes
+    ```
+  </Step>
+
+  <Step title="Update DNS">
+    Point your DNS records to the new server's IP address.
+  </Step>
+
+  <Step title="Verify restoration">
+    - Check web interface
+    - Verify deployments are accessible
+    - Test new deployments
+    - Check SSL certificates (may need re-issuance)
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+### "pgsql container is not running"
+
+**Cause**: DevPush is not running when attempting backup.
+
+**Solution**:
+```bash
+sudo systemctl start devpush.service
+# Wait for services to start
+sleep 10
+sudo /opt/devpush/scripts/backup.sh
+```
+
+### "POSTGRES_PASSWORD missing in .env"
+
+**Cause**: Environment file is corrupted or missing.
+
+**Solution**:
+1. Check `.env` file exists:
+   ```bash
+   sudo ls -la /var/lib/devpush/.env
+   ```
+2. Verify `POSTGRES_PASSWORD` is set:
+   ```bash
+   sudo grep POSTGRES_PASSWORD /var/lib/devpush/.env
+   ```
+3. If missing, restore from a previous backup or reinstall
+
+### "Permission denied" during backup
+
+**Cause**: Running backup as non-root user.
+
+**Solution**:
+```bash
+sudo /opt/devpush/scripts/backup.sh
+```
+
+### Restore fails with database errors
+
+**Cause**: Database schema mismatch or corrupted dump.
+
+**Solution**:
+1. Check PostgreSQL logs:
+   ```bash
+   docker logs devpush-pgsql-1
+   ```
+2. Try restoring just the database:
+   ```bash
+   sudo /opt/devpush/scripts/restore.sh --archive backup.tar.gz --no-data
+   ```
+3. If still failing, restore to a fresh DevPush installation
+
+### Backup archive corrupted
+
+**Cause**: Incomplete download or disk corruption.
+
+**Solution**:
+1. Verify archive integrity:
+   ```bash
+   tar -tzf backup.tar.gz >/dev/null
+   ```
+2. If corrupted, use a different backup
+3. Check disk space and filesystem health
+
+## Best practices
+
+### Regular backup schedule
+
+- **Production**: Daily backups, weekly off-site
+- **Staging**: Weekly backups
+- **Development**: As needed
+
+### Test restores regularly
+
+Practice disaster recovery:
+
+1. Create a test server
+2. Restore latest backup
+3. Verify all functionality
+4. Document any issues
+5. Repeat quarterly
+
+### Monitor backup success
+
+Create a monitoring script:
+
+```bash
+#!/bin/bash
+LATEST_BACKUP=$(find /var/lib/devpush/backups -name "devpush-*.tar.gz" -mtime -1)
+
+if [ -z "$LATEST_BACKUP" ]; then
+  echo "ERROR: No backup found in last 24 hours"
+  # Send alert (email, Slack, etc.)
+  exit 1
+fi
+
+echo "Latest backup: $LATEST_BACKUP"
+```
+
+### Secure backup storage
+
+- Encrypt backups before uploading to cloud storage
+- Use separate credentials for backup storage
+- Store encryption keys separately from backups
+- Limit access to backup files (600 permissions)
+
+### Document recovery procedures
+
+Maintain documentation:
+
+- Backup locations and credentials
+- Restore procedures and commands
+- Emergency contacts
+- DNS and infrastructure details
+
+## Next steps
+
+- [Configure SSL certificates](/guides/ssl-certificates)
+- [Set up environment variables](/guides/environment-variables)
+- [Learn about custom domains](/guides/custom-domains)

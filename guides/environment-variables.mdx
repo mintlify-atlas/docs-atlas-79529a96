@@ -1,0 +1,375 @@
+---
+title: Environment Variables
+description: Manage encrypted environment variables across different environments
+---
+
+DevPush provides secure, encrypted environment variable management with support for per-environment overrides. This guide covers how to add, manage, and use environment variables in your deployments.
+
+## How environment variables work
+
+### Encryption at rest
+
+All environment variables are encrypted using **Fernet** (symmetric encryption) before being stored in the database:
+
+```python
+# From app/models.py:380-392
+@property
+def env_vars(self) -> list[dict[str, str]]:
+    if self._env_vars:
+        fernet = get_fernet()
+        decrypted = fernet.decrypt(self._env_vars.encode()).decode()
+        return json.loads(decrypted)
+    return []
+
+@env_vars.setter
+def env_vars(self, value: list[dict[str, str]]):
+    json_str = json.dumps(value or [])
+    fernet = get_fernet()
+    self._env_vars = fernet.encrypt(json_str.encode()).decode()
+```
+
+The encryption key is auto-generated during installation and stored in your `.env` file:
+
+```bash
+# From .env.example:6
+ENCRYPTION_KEY= # python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+```
+
+### Per-environment overrides
+
+Environment variables support inheritance and overrides:
+
+1. **Global variables**: Available to all environments
+2. **Environment-specific**: Override global values for specific environments
+
+```python
+# From app/models.py:412-419
+def get_env_vars(self, environment: str) -> list[dict[str, str]]:
+    """Flattened env vars for a specific environment."""
+    env_vars = [var for var in self.env_vars if not var.get("environment")]
+    for var in self.env_vars:
+        if var.get("environment") == environment:
+            env_vars = [v for v in env_vars if v["key"] != var["key"]]
+            env_vars.append(var)
+    return env_vars
+```
+
+## Add environment variables
+
+<Steps>
+  <Step title="Navigate to project settings">
+    Go to your project and click **Settings** → **Environment Variables**.
+  </Step>
+
+  <Step title="Add a new variable">
+    Click **Add Variable** and fill in:
+    
+    - **Key**: Variable name (e.g., `DATABASE_URL`)
+    - **Value**: Variable value
+    - **Environment**: Leave empty for global, or select a specific environment
+  </Step>
+
+  <Step title="Save changes">
+    Click **Save** to encrypt and store the variable.
+  </Step>
+
+  <Step title="Redeploy to apply">
+    Environment variables are applied at deployment time. Trigger a new deployment to use the updated variables:
+    
+    - Push a new commit, or
+    - Manually redeploy from the DevPush UI
+  </Step>
+</Steps>
+
+## Variable scopes
+
+### Global variables
+
+Available to all environments:
+
+```bash
+API_KEY=abc123
+LOG_LEVEL=info
+```
+
+**Use case**: Shared configuration like API keys, service URLs, feature flags
+
+### Environment-specific variables
+
+Override global values for specific environments:
+
+```bash
+# Global
+DATABASE_URL=postgres://localhost/myapp
+
+# Production override
+DATABASE_URL=postgres://prod-db.example.com/myapp
+
+# Staging override  
+DATABASE_URL=postgres://staging-db.example.com/myapp
+```
+
+**Use case**: Different database URLs, API endpoints, or debug settings per environment
+
+## Accessing variables in your app
+
+Environment variables are injected into your deployment container at runtime.
+
+### Python example
+
+```python
+import os
+
+# Read from environment
+api_key = os.environ.get('API_KEY')
+database_url = os.environ['DATABASE_URL']  # Raises if missing
+
+# With defaults
+debug = os.environ.get('DEBUG', 'false').lower() == 'true'
+```
+
+### Node.js example
+
+```javascript
+// Read from process.env
+const apiKey = process.env.API_KEY;
+const databaseUrl = process.env.DATABASE_URL;
+
+// With defaults
+const debug = process.env.DEBUG === 'true';
+const port = parseInt(process.env.PORT || '3000', 10);
+```
+
+### PHP example
+
+```php
+<?php
+// Read from $_ENV or getenv()
+$apiKey = $_ENV['API_KEY'];
+$databaseUrl = getenv('DATABASE_URL');
+
+// With defaults
+$debug = ($_ENV['DEBUG'] ?? 'false') === 'true';
+$port = intval($_ENV['PORT'] ?? '8000');
+```
+
+## Built-in variables
+
+DevPush automatically injects these variables into every deployment:
+
+| Variable | Description | Example |
+|----------|-------------|--------|
+| `PORT` | Port your app should listen on | `8000` |
+| `ENVIRONMENT` | Current environment slug | `production` |
+| `COMMIT_SHA` | Git commit SHA | `abc123...` |
+| `BRANCH` | Git branch name | `main` |
+
+## Common patterns
+
+### Database credentials
+
+```bash
+# Global (development defaults)
+DATABASE_HOST=localhost
+DATABASE_PORT=5432
+DATABASE_NAME=myapp
+DATABASE_USER=dev
+DATABASE_PASSWORD=devpass
+
+# Production overrides
+DATABASE_HOST=prod-db.internal.example.com
+DATABASE_PASSWORD=***secure-password***
+```
+
+### API keys and secrets
+
+```bash
+# Different keys per environment
+STRIPE_API_KEY=sk_test_***  # Staging
+STRIPE_API_KEY=sk_live_***  # Production
+
+SENDGRID_API_KEY=***
+AWS_ACCESS_KEY_ID=***
+AWS_SECRET_ACCESS_KEY=***
+```
+
+### Feature flags
+
+```bash
+# Global defaults
+FEATURE_NEW_UI=false
+FEATURE_BETA_API=false
+
+# Enable in staging
+FEATURE_NEW_UI=true  # Staging only
+```
+
+### Debug and logging
+
+```bash
+# Global
+LOG_LEVEL=warning
+
+# Development override
+LOG_LEVEL=debug  # Staging/preview
+DEBUG=true
+```
+
+## Security best practices
+
+### Never commit secrets to Git
+
+```bash
+# ❌ Bad - secrets in code
+API_KEY = "abc123..."
+
+# ✅ Good - read from environment
+API_KEY = os.environ['API_KEY']
+```
+
+### Use different keys per environment
+
+- **Staging**: Test API keys, sandbox credentials
+- **Production**: Live API keys, production credentials
+- **Preview**: Same as staging or isolated test accounts
+
+### Rotate secrets regularly
+
+1. Generate new key/secret
+2. Update environment variable in DevPush
+3. Deploy new version
+4. Revoke old key/secret
+
+### Limit environment variable access
+
+Only team members with **admin** or **owner** roles can:
+- View environment variable values
+- Add or edit variables
+- Delete variables
+
+**Members** can:
+- See that variables exist (keys only, not values)
+- Trigger deployments that use the variables
+
+## Managing variables via API
+
+DevPush provides an API for programmatic environment variable management (coming soon).
+
+## Variable storage details
+
+### Encryption implementation
+
+DevPush uses **Fernet** (symmetric encryption) from the `cryptography` library:
+
+- **Algorithm**: AES-128 in CBC mode with HMAC authentication
+- **Key derivation**: Base64-encoded 32-byte key
+- **Storage**: Encrypted ciphertext stored in PostgreSQL `TEXT` column
+
+### Generating the encryption key
+
+During installation, DevPush generates a Fernet key:
+
+```bash
+python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+```
+
+This key is stored in `/var/lib/devpush/.env`:
+
+```bash
+ENCRYPTION_KEY=your-generated-key-here
+```
+
+**Important**: 
+- Never commit this key to version control
+- Back up this key securely—losing it means encrypted data is unrecoverable
+- Rotate by re-encrypting all variables with a new key
+
+### Deployment snapshot
+
+When a deployment is created, environment variables are snapshot from the project:
+
+```python
+# From app/models.py:799-806
+def __init__(self, *args, project: "Project", environment_id: str, **kwargs):
+    super().__init__(project=project, environment_id=environment_id, **kwargs)
+    # Snapshot repo, config, environments and env_vars from project at time of creation
+    self.repo_id = project.repo_id
+    self.repo_full_name = project.repo_full_name
+    self.config = project.config
+    environment = project.get_environment_by_id(environment_id)
+    self.env_vars = project.get_env_vars(environment["slug"]) if environment else []
+```
+
+This ensures:
+- Deployments use the variables that existed at deployment time
+- Changing variables doesn't affect running deployments
+- You can see historical variable state per deployment
+
+## Troubleshooting
+
+### Variables not appearing in deployment
+
+**Cause**: Variables are applied at deployment time, not retroactively.
+
+**Solution**:
+1. Add/update the variable in DevPush
+2. Trigger a new deployment (push commit or redeploy)
+3. Verify variables in deployment logs
+
+### "Failed to decrypt environment variables"
+
+**Cause**: `ENCRYPTION_KEY` is missing or incorrect.
+
+**Solution**:
+1. Verify `ENCRYPTION_KEY` exists in `/var/lib/devpush/.env`
+2. Ensure you didn't change the key after storing variables
+3. If key is lost, variables cannot be recovered—delete and re-add them
+
+### Environment-specific override not working
+
+**Cause**: Environment slug mismatch.
+
+**Solution**:
+1. Check the exact environment slug in DevPush (e.g., `production`, not `prod`)
+2. Ensure the override is assigned to the correct environment
+3. Redeploy to apply changes
+
+## Migration from other platforms
+
+### From Heroku
+
+Export Heroku config:
+
+```bash
+heroku config --shell > heroku.env
+```
+
+Import to DevPush:
+1. Open `heroku.env`
+2. Copy each variable to DevPush UI
+3. Or use DevPush API (when available)
+
+### From Vercel
+
+Export Vercel environment variables:
+
+```bash
+vercel env pull .env.vercel
+```
+
+Import to DevPush (same as Heroku).
+
+### From .env files
+
+**Do not** commit `.env` files or upload them directly. Instead:
+
+1. Read the `.env` file locally
+2. Add each variable individually in DevPush UI
+3. Assign to appropriate environment
+4. Delete the `.env` file
+
+## Next steps
+
+- [Learn about environments](/concepts/environments)
+- [Configure custom domains](/guides/custom-domains)
+- [Understand runners](/guides/runners)

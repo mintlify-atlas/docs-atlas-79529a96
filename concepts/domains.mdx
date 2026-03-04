@@ -1,0 +1,503 @@
+---
+title: Domains
+description: Configure custom domains with automatic SSL certificates and DNS verification for your deployments.
+---
+
+## Overview
+
+DevPush allows you to map custom domains to your deployments with automatic SSL certificate provisioning via Let's Encrypt. Each domain can be configured to route to a specific environment, with support for both apex domains and subdomains.
+
+<Info>
+All custom domains automatically receive SSL certificates through Traefik's ACME integration with Let's Encrypt.
+</Info>
+
+## Domain Structure
+
+Domains are stored in the database with the following fields:
+
+```python
+# From app/models.py:936-962
+class Domain(Base):
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("project.id"), index=True)
+    hostname: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    type: Mapped[str] = mapped_column(
+        SQLAEnum("route", "301", "302", "307", "308", name="domain_type"),
+        nullable=False,
+    )
+    environment_id: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    status: Mapped[str] = mapped_column(
+        SQLAEnum("pending", "active", "disabled", "failed", name="domain_status"),
+        nullable=False,
+        default="pending",
+    )
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(default=utc_now, onupdate=utc_now)
+    
+    # Relationships
+    project: Mapped[Project] = relationship(back_populates="domains")
+```
+
+## Domain Types
+
+DevPush supports routing and redirect domain types:
+
+### Route
+
+Directly routes traffic to your deployment (most common).
+
+**Use case:** Point `www.example.com` to your production environment
+
+### Redirects (301, 302, 307, 308)
+
+Redirects to another URL with different HTTP status codes:
+
+- **301:** Permanent redirect (cached by browsers)
+- **302:** Temporary redirect (not cached)
+- **307:** Temporary redirect (preserves HTTP method)
+- **308:** Permanent redirect (preserves HTTP method)
+
+**Use case:** Redirect `example.com` to `www.example.com` with a 301
+
+## Domain Status
+
+Domains progress through different states:
+
+### Pending
+
+Domain has been added but DNS verification hasn't been performed yet.
+
+**Next steps:** Configure DNS and verify the domain
+
+### Active
+
+Domain has been verified and is actively routing traffic.
+
+**Requirements:**
+- DNS records configured correctly
+- At least one successful deployment in the target environment
+- SSL certificate issued by Let's Encrypt
+
+### Failed
+
+Domain verification failed.
+
+**Common causes:**
+- DNS records not configured or pointing to wrong location
+- No successful deployment in target environment
+- DNS propagation not complete
+
+**Resolution:** Check the `message` field for specific error details, fix the issue, and verify again.
+
+### Disabled
+
+Domain has been manually disabled or the target environment was deleted.
+
+**Resolution:** Reconfigure domain with a valid environment or delete it.
+
+## DNS Configuration
+
+DevPush supports two DNS record types depending on whether you're using an apex domain or subdomain:
+
+### Apex Domain (example.com)
+
+Apex domains must use **A records** pointing to your server IP:
+
+```
+Type: A
+Name: @
+Value: <your-server-ip>
+TTL: 3600 (or Auto)
+```
+
+<Note>
+Some DNS providers (like Cloudflare) support ANAME or ALIAS records for apex domains, which can be used instead of A records.
+</Note>
+
+### Subdomain (www.example.com)
+
+Subdomains should use **CNAME records** pointing to your environment alias:
+
+```
+Type: CNAME
+Name: www
+Value: <project-slug>-env-<environment>.deploy.example.com
+TTL: 3600 (or Auto)
+```
+
+**For production environment:**
+```
+Type: CNAME
+Name: www
+Value: <project-slug>.deploy.example.com
+TTL: 3600 (or Auto)
+```
+
+## Domain Verification
+
+Domain verification ensures DNS is correctly configured before activating the domain:
+
+```python
+# From app/services/domain.py:14-87
+class DomainService:
+    def __init__(self, settings: Settings):
+        self.server_ip = settings.server_ip
+        self.deploy_domain = settings.deploy_domain
+    
+    def _is_apex_domain(self, hostname: str) -> bool:
+        """Check if domain is apex (no subdomain)"""
+        parts = hostname.split(".")
+        return len(parts) == 2
+    
+    async def verify_domain(
+        self,
+        hostname: str,
+        project_id: str,
+        environment_id: str,
+        db: AsyncSession,
+    ) -> tuple[bool, str, str | None]:
+        try:
+            # Check for successful deployment
+            has_succeeded_deployment = (
+                await db.execute(
+                    select(Deployment.id).where(
+                        Deployment.project_id == project_id,
+                        Deployment.environment_id == environment_id,
+                        Deployment.conclusion == "succeeded",
+                    )
+                )
+            ).scalars().first() is not None
+            
+            if not has_succeeded_deployment:
+                return (
+                    False,
+                    "Deployment required",
+                    f'No successful deployment found for environment "{environment_id}". '
+                    f'Deploy this environment first, then verify again.',
+                )
+            
+            if self._is_apex_domain(hostname):
+                # Apex domain: check A record points to server IP
+                a_records = dns.resolver.resolve(hostname, "A")
+                a_record_ip = str(a_records[0])
+                
+                if a_record_ip != self.server_ip:
+                    return (
+                        False,
+                        "A record mismatch",
+                        f"A record points to {a_record_ip}, expected {self.server_ip}. "
+                        f"Add an A record pointing to {self.server_ip} or use ANAME/ALIAS "
+                        f"if your DNS provider supports it.",
+                    )
+            else:
+                # Subdomain: check CNAME points to environment alias
+                try:
+                    cname_records = dns.resolver.resolve(hostname, "CNAME")
+                    cname_target = str(cname_records[0]).rstrip(".")
+                    
+                    # Check if CNAME points to our deploy domain
+                    if not cname_target.endswith(f".{self.deploy_domain}"):
+                        return (
+                            False,
+                            "CNAME target mismatch",
+                            f"CNAME points to {cname_target}, expected to point to a "
+                            f"subdomain of {self.deploy_domain}. Add a CNAME record "
+                            f"pointing to your environment alias.",
+                        )
+                except dns.resolver.NXDOMAIN:
+                    return (
+                        False,
+                        "CNAME record not found",
+                        f"No CNAME record found for {hostname}. Add a CNAME record "
+                        f"pointing to your environment alias.",
+                    )
+            
+            return True, "Domain verified successfully", None
+        
+        except Exception as e:
+            return False, "Verification failed", str(e)
+```
+
+### Verification Process
+
+<Steps>
+  <Step title="Check Deployment">
+    Verify that the target environment has at least one successful deployment
+  </Step>
+  
+  <Step title="Resolve DNS">
+    Query DNS for A record (apex) or CNAME record (subdomain)
+  </Step>
+  
+  <Step title="Validate Target">
+    Ensure DNS record points to correct server IP or environment alias
+  </Step>
+  
+  <Step title="Activate Domain">
+    Mark domain as active and update Traefik configuration
+  </Step>
+  
+  <Step title="Issue Certificate">
+    Let Traefik request SSL certificate from Let's Encrypt
+  </Step>
+</Steps>
+
+## Adding a Domain
+
+1. Navigate to project settings → Domains
+2. Click "Add Domain"
+3. Enter hostname (e.g., `www.example.com`)
+4. Select domain type (usually "route")
+5. Select target environment
+6. Save domain (status: pending)
+
+## Verifying a Domain
+
+1. Configure DNS records as shown in the verification instructions
+2. Wait for DNS propagation (can take up to 48 hours, usually much faster)
+3. Click "Verify" button on the domain
+4. If successful, status changes to "active"
+5. If failed, check the error message and fix DNS configuration
+
+<Warning>
+Domain verification requires a successful deployment in the target environment. Deploy first, then verify.
+</Warning>
+
+## Environment Integration
+
+Domains are tightly integrated with environments:
+
+```python
+# From app/models.py:545-565
+async def get_domain_by_id(self, db: AsyncSession, domain_id: int) -> dict | None:
+    """Get domain by ID"""
+    result = await db.execute(
+        select(Domain).where(
+            Domain.id == domain_id,
+            Domain.project_id == self.id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+async def get_domain_by_hostname(
+    self, db: AsyncSession, hostname: str
+) -> dict | None:
+    """Get domain by hostname"""
+    result = await db.execute(
+        select(Domain).where(
+            Domain.hostname == hostname,
+            Domain.project_id == self.id,
+        )
+    )
+    return result.scalar_one_or_none()
+```
+
+### Impact of Environment Deletion
+
+When an environment is deleted, associated domains are disabled:
+
+```python
+# Referenced from grep output in project.py
+domains_result = await db.execute(
+    select(Domain).where(
+        Domain.project_id == project.id,
+        Domain.environment_id == environment_id,
+        Domain.status.in_(["active", "pending"]),
+    )
+)
+domains_to_disable = domains_result.scalars().all()
+
+for domain in domains_to_disable:
+    domain.status = "disabled"
+    domain.message = f"Environment {environment_id} was deleted"
+    domain.environment_id = None
+```
+
+<Info>
+Disabled domains must be reconfigured with a new environment and reverified before they can become active again.
+</Info>
+
+## Traefik Integration
+
+DevPush uses Traefik for dynamic routing with file-based configuration:
+
+### Dynamic Configuration
+
+When domains are verified, Traefik configuration is regenerated:
+
+```python
+# From ARCHITECTURE.md:208
+# Traefik dynamic config for aliases/domains is written to TRAEFIK_DIR per project
+DeploymentService.update_traefik_config()
+```
+
+Traefik automatically:
+- Routes HTTP/HTTPS traffic to correct deployment
+- Requests SSL certificates from Let's Encrypt
+- Renews certificates before expiration
+- Handles HTTP to HTTPS redirects
+
+### Certificate Challenges
+
+DevPush supports multiple ACME challenge types configured via `CERT_CHALLENGE_PROVIDER`:
+
+- **default:** HTTP-01 challenge (works for most setups)
+- **cloudflare:** DNS-01 challenge using Cloudflare API
+- **route53:** DNS-01 using AWS Route 53
+- **gcloud:** DNS-01 using Google Cloud DNS
+- **digitalocean:** DNS-01 using DigitalOcean DNS
+- **azure:** DNS-01 using Azure DNS
+
+<Note>
+DNS-01 challenges are required for wildcard certificates and can work behind firewalls where HTTP-01 fails.
+</Note>
+
+## Common DNS Configurations
+
+### Apex Domain to Production
+
+**Goal:** `example.com` → Production environment
+
+**DNS:**
+```
+Type: A
+Name: @
+Value: <server-ip>
+```
+
+**DevPush:**
+- Hostname: `example.com`
+- Type: route
+- Environment: Production
+
+### www Subdomain to Production
+
+**Goal:** `www.example.com` → Production environment
+
+**DNS:**
+```
+Type: CNAME
+Name: www
+Value: <project-slug>.deploy.example.com
+```
+
+**DevPush:**
+- Hostname: `www.example.com`
+- Type: route
+- Environment: Production
+
+### Apex Redirect to www
+
+**Goal:** `example.com` → `https://www.example.com` (301 redirect)
+
+**DNS:**
+```
+Type: A
+Name: @
+Value: <server-ip>
+```
+
+**DevPush:**
+- Hostname: `example.com`
+- Type: 301
+- Target URL: `https://www.example.com`
+
+### Staging Subdomain
+
+**Goal:** `staging.example.com` → Staging environment
+
+**DNS:**
+```
+Type: CNAME
+Name: staging
+Value: <project-slug>-env-staging.deploy.example.com
+```
+
+**DevPush:**
+- Hostname: `staging.example.com`
+- Type: route
+- Environment: Staging
+
+## Troubleshooting
+
+### Domain Verification Fails
+
+<AccordionGroup>
+  <Accordion title="A record mismatch">
+    **Cause:** A record points to wrong IP address
+    
+    **Solution:** Update A record to point to your DevPush server IP (shown in error message)
+  </Accordion>
+  
+  <Accordion title="CNAME record not found">
+    **Cause:** CNAME record doesn't exist or DNS hasn't propagated
+    
+    **Solution:** 
+    - Add CNAME record pointing to environment alias
+    - Wait for DNS propagation (use `dig` or `nslookup` to check)
+  </Accordion>
+  
+  <Accordion title="CNAME target mismatch">
+    **Cause:** CNAME points to wrong target
+    
+    **Solution:** Update CNAME to point to `{project-slug}-env-{environment}.{deploy-domain}`
+  </Accordion>
+  
+  <Accordion title="Deployment required">
+    **Cause:** No successful deployment in target environment
+    
+    **Solution:** Deploy to the target environment first, then verify domain
+  </Accordion>
+</AccordionGroup>
+
+### SSL Certificate Issues
+
+**Let's Encrypt rate limits:**
+- 50 certificates per domain per week
+- 5 duplicate certificates per week
+
+**Solution:** Use Let's Encrypt staging environment during testing
+
+### DNS Propagation Delays
+
+DNS changes can take up to 48 hours to propagate globally, but usually complete within minutes to hours.
+
+**Check propagation:**
+```bash
+dig example.com
+nslookup example.com
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use CNAMEs for Subdomains" icon="link">
+    CNAMEs are more flexible than A records and automatically update if your server IP changes
+  </Card>
+  
+  <Card title="Test Before Production" icon="flask">
+    Verify domains on staging environments first to avoid SSL rate limits
+  </Card>
+  
+  <Card title="Enable Proxy Mode" icon="shield">
+    If using Cloudflare, enable proxy mode for DDoS protection and CDN benefits
+  </Card>
+  
+  <Card title="Monitor Certificates" icon="certificate">
+    Traefik auto-renews certificates, but monitor logs for any renewal failures
+  </Card>
+</CardGroup>
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Environments" icon="layer-group" href="/concepts/environments">
+    Learn how to configure environments for domain mapping
+  </Card>
+  
+  <Card title="Deployments" icon="rocket" href="/concepts/deployments">
+    Understand deployment requirements for domain verification
+  </Card>
+</CardGroup>

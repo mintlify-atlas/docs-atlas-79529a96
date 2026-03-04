@@ -1,0 +1,319 @@
+---
+title: Custom Domains
+description: Configure custom domains for your deployments with automatic SSL certificates
+---
+
+DevPush supports custom domains for your deployments with automatic Let's Encrypt SSL certificates. This guide covers DNS configuration, domain verification, and troubleshooting.
+
+## How custom domains work
+
+Each project and environment gets:
+
+- **Default domain**: Auto-generated subdomain (e.g., `myapp-production.deploy.example.com`)
+- **Custom domains**: Your own domains (e.g., `app.mycompany.com`)
+- **Automatic SSL**: Let's Encrypt certificates provisioned automatically
+
+## DNS configuration
+
+### For apex domains
+
+Apex domains (e.g., `example.com`) require an **A record** pointing to your server's IP:
+
+```dns
+A    @    YOUR-SERVER-IP
+```
+
+**Note**: Some DNS providers support `ANAME` or `ALIAS` records which can point to a hostname instead of an IP. This is recommended if available.
+
+### For subdomains
+
+Subdomains (e.g., `app.example.com`) should use a **CNAME record** pointing to your environment alias:
+
+```dns
+CNAME    app    myapp-env-production.deploy.example.com
+```
+
+**Finding your environment alias**:
+1. Go to your project in DevPush
+2. Navigate to the environment settings
+3. Copy the environment alias hostname
+
+## Add a custom domain
+
+<Steps>
+  <Step title="Navigate to your project">
+    Open your project in DevPush and go to **Settings** → **Domains**.
+  </Step>
+
+  <Step title="Click 'Add Domain'">
+    Enter your custom domain (e.g., `app.example.com`).
+  </Step>
+
+  <Step title="Select the environment">
+    Choose which environment this domain should route to:
+    
+    - Production
+    - Staging
+    - Preview
+    - Custom environment
+  </Step>
+
+  <Step title="Configure DNS">
+    Follow the DNS instructions provided:
+    
+    **For apex domains**:
+    ```dns
+    A    @    YOUR-SERVER-IP
+    ```
+    
+    **For subdomains**:
+    ```dns
+    CNAME    subdomain    your-env-alias.deploy.example.com
+    ```
+  </Step>
+
+  <Step title="Verify the domain">
+    Click **Verify** to check your DNS configuration.
+    
+    DevPush will:
+    - Check that DNS records exist
+    - Verify they point to the correct location
+    - Ensure a successful deployment exists for the environment
+  </Step>
+
+  <Step title="Wait for SSL certificate">
+    Once verified, DevPush will automatically request an SSL certificate from Let's Encrypt.
+    
+    This usually takes 1-2 minutes. The domain status will show:
+    - **Pending**: DNS verification in progress
+    - **Active**: SSL certificate issued, domain is live
+    - **Failed**: Check error message for details
+  </Step>
+</Steps>
+
+## Domain verification logic
+
+DevPush performs these checks during verification:
+
+### Prerequisites
+
+1. **Successful deployment required**: The target environment must have at least one successful deployment
+2. **DNS propagation**: Records must be propagated (can take up to 48 hours, usually much faster)
+
+### For apex domains
+
+Checks the **A record**:
+
+```python
+# From app/services/domain.py:44-54
+a_records = dns.resolver.resolve(hostname, "A")
+a_record_ip = str(a_records[0])
+
+if a_record_ip != self.server_ip:
+    return (
+        False,
+        "A record mismatch",
+        f"A record points to {a_record_ip}, expected {self.server_ip}"
+    )
+```
+
+### For subdomains
+
+Checks the **CNAME record**:
+
+```python
+# From app/services/domain.py:56-68
+cname_records = dns.resolver.resolve(hostname, "CNAME")
+cname_target = str(cname_records[0]).rstrip(".")
+
+if not cname_target.endswith(f".{self.deploy_domain}"):
+    return (
+        False,
+        "CNAME target mismatch",
+        f"CNAME points to {cname_target}, expected to point to a subdomain of {self.deploy_domain}"
+    )
+```
+
+## SSL certificates
+
+### HTTP-01 challenge (default)
+
+The default configuration uses HTTP-01 challenge:
+
+- **Pros**: No additional configuration required
+- **Cons**: Only works for non-wildcard certificates
+- **Requirements**: Port 80 must be accessible
+
+### DNS-01 challenge (recommended for wildcard)
+
+For wildcard certificates, configure a DNS-01 provider. See [SSL Certificates](/guides/ssl-certificates) for detailed setup.
+
+## Domain types
+
+DevPush supports multiple domain types:
+
+### Route (default)
+
+Standard domain routing to your deployment:
+
+```
+app.example.com → your-app deployment
+```
+
+### Redirects
+
+Automatic redirects to another URL:
+
+- **301**: Permanent redirect (for SEO, moved permanently)
+- **302**: Temporary redirect (for maintenance, A/B testing)
+- **307**: Temporary redirect (preserves HTTP method)
+- **308**: Permanent redirect (preserves HTTP method)
+
+## Troubleshooting
+
+### "No successful deployment found"
+
+**Cause**: The target environment hasn't been deployed yet.
+
+**Solution**:
+1. Deploy to the environment first
+2. Wait for deployment to succeed
+3. Retry domain verification
+
+### "A record mismatch"
+
+**Cause**: Your A record points to the wrong IP address.
+
+**Solution**:
+1. Verify your server's IP:
+   ```bash
+   curl -4 ifconfig.me
+   ```
+2. Update your DNS A record to match
+3. Wait for DNS propagation (5-60 minutes typically)
+4. Retry verification
+
+### "CNAME record not found"
+
+**Cause**: No CNAME record exists, or DNS hasn't propagated.
+
+**Solution**:
+1. Verify DNS with:
+   ```bash
+   dig app.example.com CNAME
+   ```
+2. If missing, add the CNAME record
+3. Wait for propagation
+4. Retry verification
+
+### "CNAME target mismatch"
+
+**Cause**: CNAME points to the wrong hostname.
+
+**Solution**:
+1. Check your environment alias in DevPush
+2. Update CNAME to point to the correct alias:
+   ```dns
+   CNAME    app    correct-alias.deploy.example.com
+   ```
+3. Wait for propagation
+4. Retry verification
+
+### SSL certificate not issuing
+
+**Causes**:
+- Domain verification incomplete
+- Let's Encrypt rate limits hit
+- Port 80/443 not accessible
+- Firewall blocking ACME challenge
+
+**Solutions**:
+1. Ensure domain verification passed
+2. Check Traefik logs:
+   ```bash
+   docker logs devpush-traefik-1
+   ```
+3. Verify ports are open:
+   ```bash
+   sudo ufw status
+   ```
+4. Wait and retry (Let's Encrypt has rate limits)
+
+### DNS propagation delays
+
+**Check propagation status**:
+
+```bash
+# Check A record
+dig +short example.com A
+
+# Check CNAME record  
+dig +short app.example.com CNAME
+
+# Check from specific nameserver
+dig @8.8.8.8 app.example.com CNAME
+```
+
+**Use online tools**:
+- https://www.whatsmydns.net/
+- https://dnschecker.org/
+
+## Best practices
+
+### Use Cloudflare (recommended)
+
+Cloudflare provides:
+- Fast DNS propagation (usually < 5 minutes)
+- DDoS protection
+- CDN capabilities
+- DNS-01 challenge support for wildcard certificates
+
+### Domain naming conventions
+
+- **Production**: Use apex or `www` subdomain
+  - `example.com`
+  - `www.example.com`
+- **Staging**: Use `staging` subdomain
+  - `staging.example.com`
+- **Preview**: Use descriptive subdomains
+  - `demo.example.com`
+  - `beta.example.com`
+
+### SSL best practices
+
+- **Use DNS-01 for wildcards**: If you need `*.example.com`
+- **Monitor expiration**: Let's Encrypt certs auto-renew, but monitor logs
+- **Test before production**: Add staging domain first to verify setup
+
+## Common DNS configurations
+
+### Apex domain with www redirect
+
+```dns
+# Apex to server
+A    @    YOUR-SERVER-IP
+
+# www to apex
+CNAME    www    example.com
+```
+
+Then configure a 301 redirect from `www.example.com` to `example.com` in DevPush.
+
+### Multiple environments
+
+```dns
+# Production
+CNAME    app         myapp-env-production.deploy.example.com
+
+# Staging
+CNAME    staging     myapp-env-staging.deploy.example.com
+
+# Demo
+CNAME    demo        myapp-env-demo.deploy.example.com
+```
+
+## Next steps
+
+- [Configure SSL certificates with DNS-01](/guides/ssl-certificates)
+- [Set up environment variables](/guides/environment-variables)
+- [Learn about environments](/concepts/environments)

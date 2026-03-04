@@ -1,0 +1,398 @@
+---
+title: Deployments
+description: Understand how deployments work in DevPush, including lifecycle stages, statuses, aliases, and zero-downtime updates.
+---
+
+## Overview
+
+Deployments are the core of DevPush. When you push code to GitHub or manually trigger a deployment, DevPush creates a containerized instance of your application with a specific commit, configuration snapshot, and environment variables.
+
+Each deployment captures a complete snapshot of your project configuration at creation time, including:
+
+- Repository details (`repo_id`, `repo_full_name`)
+- Commit SHA and metadata
+- Project configuration (`config`)
+- Environment-specific variables (encrypted)
+- Runner image and resource limits
+
+<Info>
+Deployments are immutable. Once created, they preserve the exact configuration and code from that moment, enabling reliable rollbacks and debugging.
+</Info>
+
+## Deployment Lifecycle
+
+Every deployment progresses through distinct stages tracked by the `status` field:
+
+### 1. Prepare
+
+The deployment container is being created and configured.
+
+**What happens:**
+- Runner container is created with Traefik labels for routing
+- Environment variables and volume mounts are configured
+- Resource limits (CPU/memory) are applied
+- Build commands are prepared
+
+```python
+# From app/models.py:759-769
+status: Mapped[str] = mapped_column(
+    SQLAEnum(
+        "prepare",
+        "deploy",
+        "finalize",
+        "fail",
+        "completed",
+        name="deployment_status",
+    ),
+    nullable=False,
+    default="prepare",
+)
+```
+
+### 2. Deploy
+
+The application is being built and started inside the container.
+
+**What happens:**
+1. Repository is cloned at the specific commit SHA
+2. Root directory is changed if configured (e.g., `frontend/`)
+3. Build command runs (e.g., `npm install`, `pip install -r requirements.txt`)
+4. Pre-deploy command executes if configured (e.g., database migrations)
+5. Start command launches the application
+
+```bash
+# From app/workers/tasks/deployment.py:88-142
+# Step 1: Clone repository
+git fetch --depth 1 https://github.com/{repo}.git {commit_sha}
+git checkout FETCH_HEAD
+
+# Step 2: Change to root directory (if configured)
+cd {root_directory}
+
+# Step 3: Install dependencies
+{build_command}
+
+# Step 4: Run pre-deploy command
+{pre_deploy_command}
+
+# Step 5: Start application
+{start_command}
+```
+
+<Note>
+The monitor worker probes the container on port 8000 over the `devpush_runner` network to detect when your app is ready.
+</Note>
+
+### 3. Finalize
+
+The application is running and routing is being configured.
+
+**What happens:**
+- Aliases are created/updated (branch, environment, deployment ID)
+- Traefik dynamic configuration is regenerated
+- Previous deployment containers are scheduled for cleanup
+- Deployment is marked as completed with a conclusion
+
+```python
+# From app/workers/tasks/deployment.py:383-450
+async def finalize_deployment(ctx, deployment_id: str):
+    # Create/update aliases
+    await DeploymentService().setup_aliases(deployment, db, settings)
+    
+    # Regenerate Traefik dynamic config for routing
+    await DeploymentService().update_traefik_config(
+        deployment.project,
+        db,
+        settings,
+        include_deployment_ids={deployment.id},
+    )
+    
+    # Mark as completed
+    await service.update_status(
+        db, deployment,
+        status="completed",
+        conclusion="succeeded",
+    )
+    
+    # Queue cleanup of inactive containers
+    await queue.enqueue_job("cleanup_inactive_containers", deployment.project_id)
+```
+
+### 4. Completed
+
+The deployment has finished with one of four conclusions:
+
+- **succeeded**: Deployment is live and serving traffic
+- **failed**: Deployment encountered an error and was stopped
+- **canceled**: User or system canceled the deployment
+- **skipped**: Deployment was skipped (e.g., duplicate commit)
+
+```python
+# From app/models.py:771-776
+conclusion: Mapped[str] = mapped_column(
+    SQLAEnum(
+        "succeeded", "failed", "canceled", "skipped", name="deployment_conclusion"
+    ),
+    nullable=True,
+)
+```
+
+## Deployment Triggers
+
+Deployments can be triggered in three ways:
+
+### Webhook
+
+Automatic deployments triggered by GitHub push events.
+
+```python
+# From app/models.py:777-781
+trigger: Mapped[str] = mapped_column(
+    SQLAEnum("webhook", "user", "api", name="deployment_trigger"),
+    nullable=False,
+    default="user",
+)
+```
+
+<Card title="Webhook Flow" icon="webhook">
+1. GitHub sends push event to `/api/github/webhook`
+2. Webhook is verified and project is resolved
+3. Deployment record is created in database
+4. `start_deployment` job is enqueued
+</Card>
+
+### Manual (User)
+
+User initiates deployment from the DevPush UI by selecting a commit and environment.
+
+### API
+
+Deployment triggered via API call (for CI/CD integration).
+
+## Aliases and Routing
+
+DevPush automatically creates three types of aliases for each successful deployment:
+
+### Branch Alias
+
+Routes traffic from the branch subdomain to the latest deployment of that branch.
+
+**Format:** `{project-slug}-branch-{branch}.{deploy-domain}`
+
+**Example:** `my-app-myteam-branch-main.deploy.example.com`
+
+### Environment Alias
+
+Routes traffic from the environment subdomain to the latest deployment of that environment.
+
+**Format (non-production):** `{project-slug}-env-{environment}.{deploy-domain}`
+
+**Format (production):** `{project-slug}.{deploy-domain}`
+
+**Example:** `my-app-myteam-env-staging.deploy.example.com`
+
+### Deployment ID Alias
+
+Provides a permanent URL for each specific deployment.
+
+**Format:** `{project-slug}-id-{deployment-id}.{deploy-domain}`
+
+**Example:** `my-app-myteam-id-a3f9c2d.deploy.example.com`
+
+```python
+# From app/models.py:856-869
+class Alias(Base):
+    subdomain: Mapped[str] = mapped_column(String(63), nullable=False, unique=True)
+    deployment_id: Mapped[str] = mapped_column(ForeignKey("deployment.id"), index=True)
+    previous_deployment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("deployment.id"), index=True, nullable=True
+    )
+    type: Mapped[str] = mapped_column(
+        SQLAEnum("branch", "environment", "environment_id", name="alias_type"),
+        nullable=False,
+    )
+    value: Mapped[str | None] = mapped_column(String(255), nullable=True)
+```
+
+<Info>
+For production environments, DevPush stores the `previous_deployment_id` to enable instant rollback functionality.
+</Info>
+
+## Zero-Downtime Deployments
+
+DevPush implements zero-downtime deployments through a blue-green deployment strategy:
+
+1. **New container starts** while old container continues serving traffic
+2. **Health check passes** when new container responds on port 8000
+3. **Alias updated** to point to new deployment (atomic operation)
+4. **Traefik routes traffic** to new container immediately
+5. **Old container stops** after a grace period to allow log shipping
+
+```python
+# From app/models.py:892-929
+@classmethod
+async def update_or_create(
+    cls,
+    db: AsyncSession,
+    subdomain: str,
+    deployment_id: str,
+    type: str,
+    value: str | None = None,
+    environment_id: str | None = None,
+) -> dict[str, object]:
+    alias = result_query.scalar_one_or_none()
+    
+    if alias:
+        if alias.deployment_id == deployment_id:
+            # Already pointing to this deployment
+            return result
+        
+        # Store previous deployment for rollback (production only)
+        if type == "environment" and environment_id == "prod":
+            alias.previous_deployment_id = alias.deployment_id
+        else:
+            alias.previous_deployment_id = None
+            
+        # Update to new deployment
+        alias.deployment_id = deployment_id
+```
+
+<Note>
+The `CONTAINER_DELETE_GRACE_SECONDS` setting (default: 3s) ensures logs are fully shipped to Loki before container deletion.
+</Note>
+
+## Container Management
+
+Deployment containers have lifecycle states tracked separately from deployment status:
+
+```python
+# From app/models.py:754-758
+container_status: Mapped[str | None] = mapped_column(
+    SQLAEnum("running", "stopped", "removed", name="deployment_container_status"),
+    nullable=True,
+)
+```
+
+### Cleanup Process
+
+Inactive containers (deployments no longer referenced by any alias) are automatically cleaned up:
+
+```python
+# From app/workers/tasks/deployment.py:589-729
+async def cleanup_inactive_containers(ctx, project_id: str, remove_containers: bool = True):
+    # Get active deployment IDs (referenced by aliases)
+    active_deployment_ids = set(active_result.scalars().all())
+    
+    # Find inactive deployments with running containers
+    inactive_deployments = await db.execute(
+        select(Deployment).where(
+            Deployment.project_id == project_id,
+            Deployment.container_id.isnot(None),
+            Deployment.container_status == "running",
+            Deployment.status == "completed",
+            Deployment.id.notin_(active_deployment_ids)
+        )
+    )
+    
+    # Stop and remove inactive containers
+    for deployment in inactive_deployments:
+        await container.stop()
+        deployment.container_status = "stopped"
+        
+        if remove_containers:
+            await container.delete()
+            deployment.container_status = "removed"
+```
+
+## Environment Variables
+
+Deployment environment variables are:
+
+1. **Snapshotted** from the project at deployment creation time
+2. **Encrypted** at rest using Fernet encryption
+3. **Flattened** to resolve environment-specific overrides
+
+```python
+# From app/models.py:799-825
+def __init__(self, *args, project: "Project", environment_id: str, **kwargs):
+    super().__init__(project=project, environment_id=environment_id, **kwargs)
+    # Snapshot repo, config, and env vars from project
+    self.repo_id = project.repo_id
+    self.repo_full_name = project.repo_full_name
+    self.config = project.config
+    environment = project.get_environment_by_id(environment_id)
+    self.env_vars = project.get_env_vars(environment["slug"]) if environment else []
+
+@property
+def env_vars(self) -> list[dict[str, str]]:
+    if self._env_vars:
+        fernet = get_fernet()
+        decrypted = fernet.decrypt(self._env_vars.encode()).decode()
+        return json.loads(decrypted)
+    return []
+```
+
+## Monitoring and Logs
+
+Deployments emit logs to Loki for real-time streaming and searchable history:
+
+- **Build logs**: Output from clone, build, and pre-deploy commands
+- **Runtime logs**: stdout/stderr from the running application
+- **System logs**: DevPush internal messages (pulling images, health checks, etc.)
+
+Logs are labeled for efficient querying:
+
+```python
+# From app/workers/tasks/deployment.py:30-36
+labels = {
+    "project_id": deployment.project_id,
+    "deployment_id": deployment.id,
+    "environment_id": deployment.environment_id,
+    "branch": deployment.branch,
+    "stream": "stdout",
+}
+```
+
+<Card title="View Deployment Logs" icon="file-lines">
+Access logs from the deployment detail page. They stream in real-time via Server-Sent Events (SSE) and remain searchable after deployment completes.
+</Card>
+
+## Resource Limits
+
+Each deployment container can have CPU and memory limits configured:
+
+```python
+# From app/workers/tasks/deployment.py:174-201
+cpus: float | None = settings.default_cpus
+memory_mb: int | None = settings.default_memory_mb
+
+if settings.allow_custom_cpu and config.get("cpus") is not None:
+    max_cpus = settings.max_cpus
+    override_cpus = float(config.get("cpus"))
+    if override_cpus > 0:
+        cpus = min(override_cpus, max_cpus)
+
+if settings.allow_custom_memory and config.get("memory") is not None:
+    max_memory_mb = settings.max_memory_mb
+    override_memory_mb = int(config.get("memory"))
+    if override_memory_mb > 0:
+        memory_mb = min(override_memory_mb, max_memory_mb)
+```
+
+**Configuration:**
+- `DEFAULT_CPUS`: Default CPU limit (none if not set)
+- `MAX_CPUS`: Maximum CPU override allowed
+- `DEFAULT_MEMORY_MB`: Default memory limit in MB
+- `MAX_MEMORY_MB`: Maximum memory override allowed
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Environments" icon="layer-group" href="/concepts/environments">
+    Learn about environment management and branch mapping
+  </Card>
+  
+  <Card title="Domains" icon="globe" href="/concepts/domains">
+    Configure custom domains for your deployments
+  </Card>
+</CardGroup>

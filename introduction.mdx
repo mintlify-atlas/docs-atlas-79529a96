@@ -1,0 +1,94 @@
+---
+title: Introduction
+description: An open-source and self-hostable alternative to Vercel, Render, and Netlify for deploying apps with zero-downtime updates
+---
+
+DevPush is an open-source and self-hostable alternative to Vercel, Render, Netlify and similar platforms. It allows you to build and deploy any app (Python, Node.js, PHP, and more) with zero-downtime updates, real-time logs, team management, customizable environments and domains.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Git-based Deployments" icon="git-alt">
+    Push to deploy from GitHub with zero-downtime rollouts and instant rollback
+  </Card>
+  <Card title="Multi-language Support" icon="code">
+    Python, Node.js, PHP... basically anything that can run on Docker
+  </Card>
+  <Card title="Environment Management" icon="sliders">
+    Multiple environments with branch mapping and encrypted environment variables
+  </Card>
+  <Card title="Real-time Monitoring" icon="chart-line">
+    Live and searchable build and runtime logs
+  </Card>
+  <Card title="Team Collaboration" icon="users">
+    Role-based access control with team invitations and permissions
+  </Card>
+  <Card title="Custom Domains" icon="globe">
+    Support for custom domains and automatic Let's Encrypt SSL certificates
+  </Card>
+  <Card title="Self-hosted" icon="server">
+    Run on your own servers, MIT licensed
+  </Card>
+  <Card title="Zero Downtime" icon="rocket">
+    Deploy updates without interrupting your users
+  </Card>
+</CardGroup>
+
+## Prerequisites
+
+Before installing DevPush, ensure you have:
+
+- **Server**: Ubuntu 20.04+ or Debian 11+ with SSH access and sudo privileges. A [Hetzner CPX31](https://devpu.sh/docs/guides/create-hetzner-server) works well.
+- **DNS**: We recommend [Cloudflare](https://cloudflare.com) for DNS management.
+- **GitHub account**: You'll create a GitHub App for login and repository access.
+- **Email provider**: A [Resend](https://resend.com) account or SMTP credentials for login emails and invitations.
+
+<Note>
+  DevPush is currently supported on Ubuntu and Debian. Other distributions may work but aren't officially supported yet.
+</Note>
+
+## How It Works
+
+DevPush integrates with your GitHub repositories to provide a seamless deployment experience:
+
+1. **Connect**: Link your GitHub repositories through a GitHub App
+2. **Configure**: Set up environments, environment variables, and domain names
+3. **Deploy**: Push code to trigger automatic builds and deployments
+4. **Monitor**: Track deployments with real-time logs and status updates
+5. **Manage**: Collaborate with your team using role-based permissions
+
+## Architecture
+
+DevPush is built with:
+
+- **FastAPI**: Modern Python web framework for the application backend
+- **Docker**: Container runtime for building and running deployments
+- **PostgreSQL**: Database for application data
+- **Redis**: Job queue and caching layer
+- **Traefik**: Reverse proxy with automatic SSL certificate management
+- **Loki**: Log aggregation and querying
+
+## Use Cases
+
+DevPush is ideal for:
+
+- **Teams** that want full control over their deployment infrastructure
+- **Agencies** managing multiple client projects
+- **Developers** building SaaS applications that need custom deployment workflows
+- **Organizations** with compliance requirements that mandate self-hosting
+- **Projects** that have outgrown static hosting but want a simple deployment experience
+
+## Open Source
+
+DevPush is MIT licensed and available on [GitHub](https://github.com/hunvreus/devpush). Contributions are welcome!
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="bolt" href="/quickstart">
+    Get DevPush running in minutes
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Detailed installation instructions
+  </Card>
+</CardGroup>

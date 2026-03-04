@@ -1,97 +1,173 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "DevPush Documentation"
+mode: "custom"
 ---
 
-## Setting up
+<div className="bg-gradient-to-br from-[#0c0c0c] via-[#1a1a1a] to-[#0c0c0c] dark:from-[#0c0c0c] dark:via-[#1a1a1a] dark:to-[#0c0c0c] py-20 px-4 sm:px-6 lg:px-8">
+  <div className="max-w-7xl mx-auto">
+    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-center">
+      <div className="lg:col-span-7">
+        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-white mb-6">
+          Deploy any app with zero downtime
+        </h1>
+        <p className="text-lg sm:text-xl text-gray-300 mb-8 max-w-2xl">
+          Open-source alternative to Vercel. Self-host your deployments with Git-based workflows, multi-language support, and real-time monitoring.
+        </p>
+        <div className="flex flex-col sm:flex-row gap-4 flex-wrap">
+          <a 
+            href="/quickstart" 
+            className="inline-flex items-center justify-center px-6 py-3 rounded-lg bg-white text-[#0c0c0c] font-semibold hover:bg-gray-100 transition-colors no-underline"
+          >
+            Get Started
+          </a>
+          <a 
+            href="/reference/architecture" 
+            className="inline-flex items-center justify-center px-6 py-3 rounded-lg border border-white/30 bg-white/10 text-white font-semibold hover:bg-white/20 transition-colors no-underline"
+          >
+            View Architecture
+          </a>
+        </div>
+      </div>
+      <div className="lg:col-span-5 hidden lg:block">
+        <img 
+          src="https://devpu.sh/media/screenshot-dark.png" 
+          alt="DevPush deployment interface showing real-time logs and deployment status" 
+          noZoom 
+          className="w-full h-auto rounded-xl shadow-2xl border border-white/10"
+        />
+      </div>
+    </div>
+  </div>
+</div>
 
-Get your documentation site up and running in minutes.
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">
+    Quick Start
+  </h2>
+  <p className="text-base text-gray-600 dark:text-gray-400 mb-8">
+    Get DevPush running on your server in minutes
+  </p>
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+  <Steps>
+    <Step title="Install on your server">
+      Run the installation script on a fresh Ubuntu/Debian server with SSH access:
 
-## Make it yours
+      ```bash
+      curl -fsSL https://install.devpu.sh | sudo bash
+      ```
 
-Design a docs site that looks great and empowers your users.
+      The installer sets up Docker, creates the `devpush` system user, clones the repository, and configures systemd.
+    </Step>
 
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
-  </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
-  </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
-  </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
-  </Card>
-</Columns>
+    <Step title="Create a GitHub App">
+      DevPush uses a GitHub App for authentication and repository access. Follow the [GitHub App setup guide](/guides/github-app) to create one.
 
-## Create beautiful pages
+      You'll need to configure these settings in `/var/lib/devpush/.env`:
+      - `GITHUB_APP_ID`
+      - `GITHUB_APP_NAME`
+      - `GITHUB_APP_PRIVATE_KEY`
+      - `GITHUB_APP_WEBHOOK_SECRET`
+      - `GITHUB_APP_CLIENT_ID`
+      - `GITHUB_APP_CLIENT_SECRET`
+    </Step>
 
-Everything you need to create world-class documentation.
+    <Step title="Configure and start">
+      Edit `/var/lib/devpush/.env` with your domain settings and start the service:
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+      ```bash
+      sudo systemctl start devpush.service
+      ```
 
-## Need inspiration?
+      Set DNS records for your app hostname and deployment domain (wildcard A record).
+    </Step>
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+    <Step title="Deploy your first project">
+      Log in to your DevPush instance, connect your GitHub account, and create your first project. Push to your repository and watch your deployment go live with zero downtime.
+    </Step>
+  </Steps>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">
+    Core Features
+  </h2>
+  <p className="text-base text-gray-600 dark:text-gray-400 mb-8">
+    Everything you need for production deployments
+  </p>
+
+  <CardGroup cols={2}>
+    <Card title="Git-Based Deployments" icon="git-alt" href="/concepts/deployments">
+      Push to deploy with zero-downtime rollouts and instant rollback. Automatic builds triggered by GitHub webhooks.
+    </Card>
+    <Card title="Multi-Language Support" icon="code" href="/guides/runners">
+      Deploy Python, Node.js, PHP, and more. Runner images support any language that runs in Docker.
+    </Card>
+    <Card title="Environment Management" icon="layer-group" href="/concepts/environments">
+      Multiple environments with branch mapping and encrypted environment variables. Preview deployments for every branch.
+    </Card>
+    <Card title="Real-Time Logs" icon="terminal" href="/operations/monitoring">
+      Stream build and runtime logs in real-time. Searchable log aggregation powered by Loki.
+    </Card>
+    <Card title="Team Collaboration" icon="users" href="/concepts/teams">
+      Role-based access control with team invitations. Manage permissions for owners, admins, and members.
+    </Card>
+    <Card title="Custom Domains" icon="globe" href="/guides/custom-domains">
+      Add custom domains with automatic Let's Encrypt SSL certificates. Support for multiple DNS providers.
+    </Card>
+  </CardGroup>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">
+    Explore Documentation
+  </h2>
+  <p className="text-base text-gray-600 dark:text-gray-400 mb-8">
+    Deep dive into concepts, guides, and operations
+  </p>
+
+  <CardGroup cols={3}>
+    <Card title="Installation" icon="download" href="/installation">
+      Complete installation guide for production and development environments
+    </Card>
+    <Card title="GitHub App Setup" icon="github" href="/guides/github-app">
+      Configure GitHub authentication and webhooks
+    </Card>
+    <Card title="Environment Variables" icon="key" href="/guides/environment-variables">
+      Manage secrets and configuration per environment
+    </Card>
+    <Card title="SSL Certificates" icon="lock" href="/guides/ssl-certificates">
+      Automatic HTTPS with Let's Encrypt and DNS providers
+    </Card>
+    <Card title="Scaling" icon="chart-line" href="/operations/scaling">
+      Horizontal scaling for app, workers, and database
+    </Card>
+    <Card title="Troubleshooting" icon="screwdriver-wrench" href="/operations/troubleshooting">
+      Common issues and debugging strategies
+    </Card>
+  </CardGroup>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <div className="bg-gradient-to-br from-[#0c0c0c] to-[#1a1a1a] dark:from-[#0c0c0c] dark:to-[#1a1a1a] rounded-2xl p-8 sm:p-12 border border-gray-200 dark:border-[#27272a]">
+    <h2 className="text-3xl font-bold text-white mb-4">
+      Ready to deploy?
+    </h2>
+    <p className="text-lg text-gray-300 mb-6 max-w-2xl">
+      Get started with DevPush today. Open source, self-hosted, and built for production.
+    </p>
+    <div className="flex flex-col sm:flex-row gap-4">
+      <a 
+        href="/quickstart" 
+        className="inline-flex items-center justify-center px-6 py-3 rounded-lg bg-white text-[#0c0c0c] font-semibold hover:bg-gray-100 transition-colors no-underline"
+      >
+        Start Deploying
+      </a>
+      <a 
+        href="https://github.com/hunvreus/devpush" 
+        className="inline-flex items-center justify-center px-6 py-3 rounded-lg border border-white/30 bg-white/10 text-white font-semibold hover:bg-white/20 transition-colors no-underline"
+      >
+        View on GitHub
+      </a>
+    </div>
+  </div>
+</div>

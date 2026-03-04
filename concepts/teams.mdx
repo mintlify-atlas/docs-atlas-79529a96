@@ -1,0 +1,437 @@
+---
+title: Teams
+description: Collaborate with team members using role-based access control, invitations, and shared projects.
+---
+
+## Overview
+
+Teams in DevPush enable collaboration on projects with role-based permissions. Each team has members with specific roles that control what actions they can perform. Teams own projects, storage resources, and manage access through invitations.
+
+<Info>
+When you create a DevPush account, you can create teams and invite collaborators to work together on shared projects.
+</Info>
+
+## Team Structure
+
+Teams are represented in the database with the following core fields:
+
+```python
+# From app/models.py:168-190
+class Team(Base):
+    id: Mapped[str] = mapped_column(
+        String(32), primary_key=True, default=lambda: token_hex(16)
+    )
+    name: Mapped[str] = mapped_column(String(100), index=True)
+    slug: Mapped[str] = mapped_column(String(40), nullable=True, unique=True)
+    has_avatar: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(
+        SQLAEnum("active", "deleted", name="team_status"),
+        nullable=False,
+        default="active",
+    )
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("user.id", use_alter=True, ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        index=True, nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        index=True, nullable=False, default=utc_now, onupdate=utc_now
+    )
+```
+
+### Team Slugs
+
+Team slugs are automatically generated from the team name and must be unique:
+
+```python
+# From app/models.py:204-225
+@event.listens_for(Team, "after_insert")
+def set_team_slug(mapper, connection, team):
+    """Generate and set slug after team is inserted (and has an ID)."""
+    if not team.slug:
+        base_slug = team.name.lower()
+        base_slug = base_slug.replace(" ", "-").replace("_", "-").replace(".", "-")
+        base_slug = re.sub(r"[^a-z0-9-]", "", base_slug)
+        base_slug = re.sub(r"-+", "-", base_slug)
+        base_slug = base_slug[:40].strip("-")
+        
+        if not base_slug or base_slug in FORBIDDEN_TEAM_SLUGS:
+            base_slug = f"team-{team.id}"[:40]
+        
+        new_slug = (
+            base_slug
+            if not connection.scalar(
+                select(Team.slug).where(func.lower(Team.slug) == base_slug.lower())
+            )
+            else f"{base_slug[:32]}-{str(team.id)[:7]}"
+        )
+        
+        connection.execute(update(Team).where(Team.id == team.id).values(slug=new_slug))
+        team.slug = new_slug
+```
+
+### Forbidden Slugs
+
+Certain slugs are reserved for system routes:
+
+```python
+# From app/models.py:33-44
+FORBIDDEN_TEAM_SLUGS = [
+    "admin",
+    "api",
+    "assets",
+    "auth",
+    "deployment-not-found",
+    "health",
+    "new-team",
+    "setup",
+    "upload",
+    "user",
+]
+```
+
+## Team Roles
+
+DevPush has three role levels with increasing permissions:
+
+### Member
+
+**Permissions:**
+- View team projects
+- View deployments
+- View team members
+- Create and manage own storage resources (databases, volumes, etc.)
+
+**Cannot:**
+- Modify team settings
+- Invite or remove members
+- Delete projects
+- Manage other members' storage
+
+```python
+# From app/models.py:228-244
+class TeamMember(Base):
+    id: Mapped[int] = mapped_column(primary_key=True)
+    team_id: Mapped[str] = mapped_column(ForeignKey("team.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), index=True)
+    role: Mapped[str] = mapped_column(
+        SQLAEnum("owner", "admin", "member", name="team_member_role"),
+        nullable=False,
+        default="member",
+    )
+    created_at: Mapped[datetime] = mapped_column(default=utc_now)
+    
+    # Relationships
+    team: Mapped[Team] = relationship()
+    user: Mapped[User] = relationship()
+```
+
+### Admin
+
+**Permissions (all member permissions plus):**
+- Create, edit, and delete projects
+- Manage deployments
+- Invite team members
+- Remove members (except owners)
+- Change member roles (except owners)
+- Manage all team storage resources
+- Edit team settings
+
+**Cannot:**
+- Delete the team
+- Remove or demote owners
+
+### Owner
+
+**Permissions (all admin permissions plus):**
+- Delete the team
+- Manage all team members including other owners
+- Transfer team ownership
+- Access to all team resources without restrictions
+
+<Note>
+A team must have at least one owner. When creating a team, the creator is automatically assigned the owner role.
+</Note>
+
+## Creating a Team
+
+Users can create teams from the "New Team" dialog:
+
+```python
+# From app/routers/team.py:67-92
+@router.api_route("/new-team", methods=["GET", "POST"], name="new_team")
+async def new_team(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    form: Any = await TeamCreateForm.from_formdata(request)
+    
+    if request.method == "POST" and await form.validate_on_submit():
+        # Create team
+        team = Team(name=form.name.data, created_by_user_id=current_user.id)
+        db.add(team)
+        await db.flush()
+        
+        # Add creator as owner
+        db.add(TeamMember(team_id=team.id, user_id=current_user.id, role="owner"))
+        await db.commit()
+        
+        return Response(
+            status_code=200,
+            headers={
+                "HX-Redirect": str(request.url_for("team_index", team_slug=team.slug))
+            },
+        )
+```
+
+## Team Invitations
+
+Team administrators and owners can invite new members via email:
+
+```python
+# From app/models.py:246-272
+class TeamInvite(Base):
+    id: Mapped[str] = mapped_column(
+        String(32), primary_key=True, default=lambda: token_hex(16)
+    )
+    team_id: Mapped[str] = mapped_column(ForeignKey("team.id"), index=True)
+    email: Mapped[str] = mapped_column(String(320), index=True)
+    role: Mapped[str] = mapped_column(
+        SQLAEnum("owner", "admin", "member", name="team_invite_role"),
+        nullable=False,
+        default="member",
+    )
+    status: Mapped[str] = mapped_column(
+        SQLAEnum("pending", "accepted", "revoked", name="team_invite_status"),
+        nullable=False,
+        default="pending",
+    )
+    inviter_id: Mapped[int] = mapped_column(ForeignKey("user.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(default=utc_now)
+    expires_at: Mapped[datetime] = mapped_column(
+        default=lambda: utc_now() + timedelta(days=30)
+    )
+    
+    # Relationships
+    team: Mapped[Team] = relationship()
+    inviter: Mapped[User] = relationship()
+```
+
+### Invitation Lifecycle
+
+1. **Sent:** Admin/owner sends invitation with specified role
+2. **Pending:** Invitation email sent to recipient (expires in 30 days)
+3. **Accepted:** Recipient clicks link and joins team with assigned role
+4. **Revoked:** Admin/owner cancels invitation before acceptance
+
+<Info>
+Invitations are sent via email using either Resend or SMTP as configured in your DevPush instance.
+</Info>
+
+## Permission Checks
+
+DevPush uses dependency injection for access control:
+
+### Role-Based Access
+
+```python
+# From app/routers/team.py:100-102
+@router.get("/{team_slug}", name="team_index")
+async def team_index(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    team_and_membership: tuple[Team, TeamMember] = Depends(get_team_by_slug),
+    role: str = Depends(get_role),
+):
+```
+
+The `get_role` dependency extracts the user's role from their team membership.
+
+### Access Level Checks
+
+```python
+# From app/routers/team.py:246
+if not get_access(role, "admin"):
+    query = query.where(Storage.created_by_user_id == current_user.id)
+```
+
+The `get_access` function checks if a role has at least the specified access level:
+
+**Access hierarchy:**
+- `member` < `admin` < `owner`
+
+## Team Resources
+
+Teams own and manage several types of resources:
+
+### Projects
+
+All projects belong to a team:
+
+```python
+# From app/models.py:354
+team_id: Mapped[str] = mapped_column(ForeignKey("team.id"), index=True)
+```
+
+### Storage
+
+Databases, volumes, key-value stores, and queues are team-scoped:
+
+```python
+# From app/models.py:660
+team_id: Mapped[str] = mapped_column(ForeignKey("team.id"), index=True)
+```
+
+<Note>
+Members can only manage their own storage resources unless they have admin or owner permissions.
+</Note>
+
+### Deployments
+
+Deployments are accessible to all team members through their associated projects:
+
+```python
+# From app/routers/team.py:113-121
+deployments_result = await db.execute(
+    select(Deployment)
+    .options(selectinload(Deployment.aliases))
+    .join(Project)
+    .where(Project.team_id == team.id, Project.status != "deleted")
+    .order_by(Deployment.created_at.desc())
+    .limit(10)
+)
+deployments = deployments_result.scalars().all()
+```
+
+## Team Management
+
+### Viewing Team Members
+
+Admins and owners can view all team members with their roles and join dates.
+
+### Adding Members
+
+1. Navigate to team settings
+2. Click "Invite Member"
+3. Enter email address
+4. Select role (member, admin, or owner)
+5. Send invitation
+
+### Changing Roles
+
+Admins can change roles of members. Owners can change roles of any member including other owners.
+
+### Removing Members
+
+- Members cannot remove other members
+- Admins can remove members but not owners
+- Owners can remove anyone including other owners
+- At least one owner must remain
+
+<Warning>
+Removing a member immediately revokes their access to all team projects, deployments, and resources.
+</Warning>
+
+## Team Settings
+
+### General Settings
+
+- **Team name:** Display name shown throughout the interface
+- **Team avatar:** Optional logo/image for visual identification
+- **Team slug:** URL-safe identifier (auto-generated, can be customized)
+
+### Deleting a Team
+
+Only owners can delete teams. Deleting a team:
+
+1. Marks team as `status="deleted"`
+2. Triggers background job to clean up resources:
+   - Stops all running deployments
+   - Removes deployment containers
+   - Deletes team projects
+   - Removes team storage
+3. Removes all team memberships
+4. Cannot be undone
+
+<Warning>
+Deleting a team permanently removes all projects, deployments, and data. This action cannot be reversed.
+</Warning>
+
+## Team Collaboration Workflow
+
+<Steps>
+  <Step title="Create Team">
+    Owner creates team and is automatically assigned owner role
+  </Step>
+  
+  <Step title="Invite Members">
+    Owner or admin sends invitations to team members with appropriate roles
+  </Step>
+  
+  <Step title="Accept Invitations">
+    Invited users receive email and click to join team
+  </Step>
+  
+  <Step title="Create Projects">
+    Team members with admin/owner permissions create projects
+  </Step>
+  
+  <Step title="Deploy Together">
+    All team members can view deployments and collaborate on shared projects
+  </Step>
+</Steps>
+
+## Access Control Matrix
+
+| Action | Member | Admin | Owner |
+|--------|--------|-------|-------|
+| View projects | ✓ | ✓ | ✓ |
+| Create projects | ✗ | ✓ | ✓ |
+| Delete projects | ✗ | ✓ | ✓ |
+| View deployments | ✓ | ✓ | ✓ |
+| Create deployments | ✓ | ✓ | ✓ |
+| View team members | ✓ | ✓ | ✓ |
+| Invite members | ✗ | ✓ | ✓ |
+| Remove members | ✗ | ✓* | ✓ |
+| Change member roles | ✗ | ✓* | ✓ |
+| Edit team settings | ✗ | ✓ | ✓ |
+| Delete team | ✗ | ✗ | ✓ |
+| Manage own storage | ✓ | ✓ | ✓ |
+| Manage all storage | ✗ | ✓ | ✓ |
+
+<sub>* Admins cannot remove or change roles of owners</sub>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Principle of Least Privilege" icon="shield-halved">
+    Grant the minimum role needed for each team member to perform their work
+  </Card>
+  
+  <Card title="Multiple Owners" icon="users">
+    Have at least 2 owners to prevent lockout if one owner loses access
+  </Card>
+  
+  <Card title="Regular Audits" icon="list-check">
+    Periodically review team members and remove those who no longer need access
+  </Card>
+  
+  <Card title="Clear Naming" icon="tag">
+    Use descriptive team names that reflect your organization or project
+  </Card>
+</CardGroup>
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Deployments" icon="rocket" href="/concepts/deployments">
+    Learn how teams organize and manage deployments
+  </Card>
+  
+  <Card title="Deployments" icon="rocket" href="/concepts/deployments">
+    Understand how team members collaborate on deployments
+  </Card>
+</CardGroup>

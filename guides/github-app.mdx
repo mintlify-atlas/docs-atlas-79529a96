@@ -1,0 +1,214 @@
+---
+title: Creating a GitHub App
+description: Step-by-step guide to creating and configuring a GitHub App for DevPush authentication and repository access
+---
+
+DevPush uses a GitHub App for user authentication and repository access. This guide walks you through creating and configuring your GitHub App.
+
+## Why a GitHub App?
+
+DevPush requires a GitHub App for:
+
+- **User authentication**: Login via GitHub OAuth
+- **Repository access**: Read repository metadata and receive webhook events
+- **Deployment integration**: Update commit statuses and deployment states
+
+## Create the GitHub App
+
+<Steps>
+  <Step title="Navigate to GitHub App settings">
+    Go to your GitHub account settings:
+    
+    - Personal account: `https://github.com/settings/apps`
+    - Organization: `https://github.com/organizations/YOUR-ORG/settings/apps`
+  </Step>
+
+  <Step title="Click 'New GitHub App'">
+    Fill in the basic information:
+    
+    - **GitHub App name**: Choose a unique name (e.g., `DevPush - MyCompany`)
+    - **Homepage URL**: Your DevPush instance URL (e.g., `https://deploy.example.com`)
+  </Step>
+
+  <Step title="Configure callback URLs">
+    Set the OAuth callback URL:
+    
+    ```
+    https://YOUR-APP-HOSTNAME/auth/github/callback
+    ```
+    
+    Replace `YOUR-APP-HOSTNAME` with your actual domain (e.g., `deploy.example.com`).
+  </Step>
+
+  <Step title="Enable webhook">
+    Configure the webhook:
+    
+    - **Webhook URL**: `https://YOUR-APP-HOSTNAME/api/webhooks/github`
+    - **Webhook secret**: Generate a random secret:
+      ```bash
+      openssl rand -hex 32
+      ```
+    - Keep this secret—you'll need it for the `.env` file
+  </Step>
+
+  <Step title="Set repository permissions">
+    Configure the following **Repository permissions**:
+    
+    | Permission | Access |
+    |------------|--------|
+    | Contents | Read-only |
+    | Metadata | Read-only |
+    | Deployments | Read and write |
+    | Commit statuses | Read and write |
+  </Step>
+
+  <Step title="Subscribe to events">
+    Enable these webhook events:
+    
+    - Push
+    - Deployment
+    - Repository
+  </Step>
+
+  <Step title="Set installation scope">
+    Choose where the app can be installed:
+    
+    - **Only on this account**: Limit to your personal/org account
+    - **Any account**: Allow installation on any account
+  </Step>
+
+  <Step title="Create the app">
+    Click **Create GitHub App** to save your configuration.
+  </Step>
+
+  <Step title="Generate a private key">
+    After creating the app:
+    
+    1. Scroll to the **Private keys** section
+    2. Click **Generate a private key**
+    3. A `.pem` file will download—keep this secure
+  </Step>
+
+  <Step title="Note your credentials">
+    You'll need these values for your `.env` file:
+    
+    - **App ID**: Found at the top of the settings page
+    - **Client ID**: In the OAuth section
+    - **Client Secret**: Click "Generate a new client secret" in the OAuth section
+  </Step>
+</Steps>
+
+## Configure DevPush
+
+Add your GitHub App credentials to `/var/lib/devpush/.env`:
+
+```bash
+# GitHub App credentials
+GITHUB_APP_ID=123456
+GITHUB_APP_NAME=devpush-mycompany
+GITHUB_APP_CLIENT_ID=Iv1.a1b2c3d4e5f6g7h8
+GITHUB_APP_CLIENT_SECRET=1234567890abcdef1234567890abcdef12345678
+GITHUB_APP_WEBHOOK_SECRET=your-webhook-secret-from-step-4
+```
+
+### Add the private key
+
+The private key must be formatted as a single line with `\n` for newlines:
+
+```bash
+# Convert PEM file to single-line format
+awk 'NF {sub(/\r/, ""); printf "%s\\n",$0;}' your-app.pem
+```
+
+Add the result to your `.env`:
+
+```bash
+GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQ...\n-----END RSA PRIVATE KEY-----\n"
+```
+
+## Install the GitHub App
+
+<Steps>
+  <Step title="Navigate to the installation page">
+    Go to your GitHub App's public page:
+    
+    ```
+    https://github.com/apps/YOUR-APP-NAME
+    ```
+  </Step>
+
+  <Step title="Click 'Install'">
+    Choose where to install:
+    
+    - Your personal account
+    - An organization you manage
+  </Step>
+
+  <Step title="Select repository access">
+    Choose repository access:
+    
+    - **All repositories**: Grant access to all current and future repos
+    - **Only select repositories**: Choose specific repos to deploy
+  </Step>
+
+  <Step title="Complete installation">
+    Click **Install** to authorize the app.
+  </Step>
+</Steps>
+
+## Start DevPush
+
+After configuring your `.env` file, start the service:
+
+```bash
+sudo systemctl start devpush.service
+```
+
+Or if you're managing it manually:
+
+```bash
+sudo /opt/devpush/scripts/start.sh
+```
+
+## Verify the setup
+
+1. Visit your DevPush instance (e.g., `https://deploy.example.com`)
+2. Click **Sign in with GitHub**
+3. Authorize the app if prompted
+4. You should be redirected to the DevPush dashboard
+
+## Troubleshooting
+
+### "App ID or private key invalid"
+
+- Verify `GITHUB_APP_ID` matches the App ID from GitHub
+- Ensure the private key is properly formatted with `\n` for newlines
+- Check that you copied the entire key including `BEGIN` and `END` markers
+
+### "Webhook secret mismatch"
+
+- Confirm `GITHUB_APP_WEBHOOK_SECRET` matches the secret you set in GitHub
+- Regenerate the secret if needed and update both GitHub and your `.env`
+
+### "OAuth callback URL mismatch"
+
+- Verify the callback URL in GitHub matches:
+  ```
+  https://YOUR-APP-HOSTNAME/auth/github/callback
+  ```
+- Ensure `APP_HOSTNAME` in `.env` is correct
+- Check for typos in the URL (http vs https, trailing slashes)
+
+## Security best practices
+
+- **Protect your private key**: Never commit it to version control
+- **Rotate secrets regularly**: Regenerate webhook secrets and client secrets periodically
+- **Limit installation scope**: Only install on repositories you need to deploy
+- **Review permissions**: The app only needs the permissions listed above
+- **Monitor access**: Regularly review installed accounts in your GitHub App settings
+
+## Next steps
+
+- [Set up custom domains](/guides/custom-domains)
+- [Configure environment variables](/guides/environment-variables)
+- [Deploy your first project](/quickstart)

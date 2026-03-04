@@ -1,0 +1,463 @@
+---
+title: Runners
+description: Understanding runner images, language support, and custom build configurations
+---
+
+Runners are Docker images that provide the runtime environment for building and running your applications. DevPush ships with pre-configured runners for popular languages and frameworks.
+
+## What is a runner?
+
+A runner is a Docker image that contains:
+
+- **Runtime**: Language interpreter or runtime (Python, Node.js, PHP, etc.)
+- **Build tools**: Package managers, compilers, build utilities
+- **Web server**: Application server, reverse proxy, or HTTP server
+- **System dependencies**: Common libraries and tools
+
+## Built-in runners
+
+DevPush includes runners from the [registry catalog](https://github.com/devpushhq/registry):
+
+### Python
+
+| Runner | Name | Image |
+|--------|------|-------|
+| `python-3.12` | Python 3.12 | `ghcr.io/devpushhq/runner-python-3.12:1.0.1` |
+| `pypy-3.11` | PyPy (Python 3.11) | `ghcr.io/devpushhq/runner-pypy-3.11:1.0.1` |
+
+**Includes**: pip, gunicorn, common build dependencies
+
+### Node.js
+
+| Runner | Name | Image |
+|--------|------|-------|
+| `node-20` | Node.js 20 | `ghcr.io/devpushhq/runner-node-20:1.0.1` |
+
+**Includes**: npm, yarn, pnpm
+
+### Bun
+
+| Runner | Name | Image |
+|--------|------|-------|
+| `bun-1.3` | Bun 1.3 | `ghcr.io/devpushhq/runner-bun-1.3:1.0.1` |
+
+**Includes**: Bun runtime and package manager
+
+### Go
+
+| Runner | Name | Image |
+|--------|------|-------|
+| `go-1.25` | Go 1.25 | `ghcr.io/devpushhq/runner-go-1.25:1.0.1` |
+
+**Includes**: Go compiler and toolchain
+
+### PHP
+
+| Runner | Name | Image |
+|--------|------|-------|
+| `php-fpm-8.3` | PHP-FPM 8.3 + Caddy | `ghcr.io/devpushhq/runner-php-fpm-8.3:1.0.4` |
+| `php-fpm-node-8.3` | PHP-FPM 8.3 + Caddy + Node 22 | `ghcr.io/devpushhq/runner-php-fpm-node-8.3:1.0.4` |
+| `frankenphp-8.3` | FrankenPHP (PHP 8.3) | `ghcr.io/devpushhq/runner-frankenphp-8.3:1.0.2` |
+| `frankenphp-node-8.3` | FrankenPHP (PHP 8.3) + Node 22 | `ghcr.io/devpushhq/runner-frankenphp-node-8.3:1.0.2` |
+| `frankenphp-node-worker-8.3` | FrankenPHP (Worker Mode) + Node 22 | `ghcr.io/devpushhq/runner-frankenphp-node-worker-8.3:1.0.2` |
+
+**Includes**: Composer, common PHP extensions, Caddy or FrankenPHP
+
+## Auto-detection
+
+DevPush can automatically detect your project's language and select an appropriate runner based on files in your repository:
+
+```json
+// From registry/catalog.json - Python detection
+"detection": {
+  "priority": 30,
+  "any_files": [
+    "requirements.txt",
+    "pyproject.toml",
+    "setup.py",
+    "Pipfile",
+    "poetry.lock"
+  ]
+}
+```
+
+### Detection priority
+
+1. **Explicit configuration**: If you specify a runner in project settings, it always wins
+2. **Framework presets**: Detected based on specific files (e.g., `next.config.js` → Next.js)
+3. **Language presets**: Detected based on generic files (e.g., `package.json` → Node.js)
+4. **Default runner**: Falls back to `python-3.12` if no detection matches
+
+## Configure your runner
+
+<Steps>
+  <Step title="Navigate to project settings">
+    Go to your project and click **Settings** → **Build & Deploy**.
+  </Step>
+
+  <Step title="Select a runner">
+    Choose from available runners:
+    
+    - **Auto-detect**: Let DevPush choose based on your repository files
+    - **Specific runner**: Select a language/framework runner manually
+  </Step>
+
+  <Step title="Configure build commands">
+    Customize the build process:
+    
+    - **Build command**: Install dependencies and compile assets
+    - **Pre-deploy command**: Run database migrations, cache warming, etc.
+    - **Start command**: Launch your application
+  </Step>
+
+  <Step title="Save and deploy">
+    Click **Save** and trigger a new deployment to use the updated configuration.
+  </Step>
+</Steps>
+
+## Build commands
+
+### Build command
+
+Runs during the build phase to prepare your application:
+
+**Python**:
+```bash
+pip install -r requirements.txt
+```
+
+**Node.js**:
+```bash
+npm install && npm run build
+```
+
+**PHP**:
+```bash
+composer install --no-dev --optimize-autoloader
+```
+
+**Go**:
+```bash
+go build -o app .
+```
+
+### Pre-deploy command
+
+Runs after build, before starting the new container:
+
+**Database migrations**:
+```bash
+python manage.py migrate
+```
+
+**Cache warming**:
+```bash
+php artisan config:cache && php artisan route:cache
+```
+
+**Asset compilation**:
+```bash
+npm run build:production
+```
+
+### Start command
+
+Launches your application server:
+
+**Python (Gunicorn)**:
+```bash
+gunicorn -w 3 -b 0.0.0.0:8000 main:app
+```
+
+**Node.js**:
+```bash
+node server.js
+```
+
+**PHP-FPM**:
+```bash
+# Handled by runner - Caddy serves PHP-FPM automatically
+```
+
+**Go**:
+```bash
+./app
+```
+
+## Registry catalog structure
+
+Runners are defined in the registry catalog:
+
+```bash
+# Registry location
+/var/lib/devpush/registry/catalog.json
+```
+
+Catalog format:
+
+```json
+{
+  "meta": {
+    "version": "1.0.5",
+    "source": "bundled"
+  },
+  "runners": [
+    {
+      "slug": "python-3.12",
+      "name": "Python 3.12",
+      "category": "Python",
+      "image": "ghcr.io/devpushhq/runner-python-3.12:1.0.1"
+    }
+  ],
+  "presets": [
+    {
+      "slug": "flask",
+      "name": "Flask",
+      "category": "Python",
+      "config": {
+        "runner": "python-3.12",
+        "build_command": "pip install -r requirements.txt",
+        "start_command": "gunicorn -w 3 -b 0.0.0.0:8000 main:app"
+      }
+    }
+  ]
+}
+```
+
+## Custom runner overrides
+
+You can customize runners by editing the overrides file:
+
+```bash
+/var/lib/devpush/registry/overrides.json
+```
+
+Example override:
+
+```json
+{
+  "runners": [
+    {
+      "slug": "python-custom",
+      "name": "Python 3.12 (Custom)",
+      "category": "Python",
+      "image": "myregistry.example.com/python:custom"
+    }
+  ]
+}
+```
+
+**Notes**:
+- Overrides merge with the catalog
+- Same `slug` replaces the catalog entry
+- `catalog.json` is updated during DevPush updates
+- `overrides.json` persists across updates
+
+## Custom Docker images
+
+You can use your own Docker images as runners:
+
+<Steps>
+  <Step title="Build your custom image">
+    Create a Dockerfile with your runtime and dependencies:
+    
+    ```dockerfile
+    FROM python:3.12-slim
+    
+    # Install system dependencies
+    RUN apt-get update && apt-get install -y \\
+        build-essential \\
+        libpq-dev \\
+        && rm -rf /var/lib/apt/lists/*
+    
+    # Install Python packages
+    RUN pip install gunicorn gevent psycopg2-binary
+    
+    # Set working directory
+    WORKDIR /app
+    
+    # Default port
+    EXPOSE 8000
+    ```
+  </Step>
+
+  <Step title="Push to a registry">
+    Build and push your image:
+    
+    ```bash
+    docker build -t myregistry.example.com/python-custom:1.0 .
+    docker push myregistry.example.com/python-custom:1.0
+    ```
+  </Step>
+
+  <Step title="Add to overrides.json">
+    Edit `/var/lib/devpush/registry/overrides.json`:
+    
+    ```json
+    {
+      "runners": [
+        {
+          "slug": "python-custom",
+          "name": "Python Custom",
+          "category": "Python",
+          "image": "myregistry.example.com/python-custom:1.0"
+        }
+      ]
+    }
+    ```
+  </Step>
+
+  <Step title="Restart DevPush">
+    Reload the catalog:
+    
+    ```bash
+    sudo systemctl restart devpush.service
+    ```
+  </Step>
+
+  <Step title="Select in project settings">
+    The custom runner will now appear in the runner selection dropdown.
+  </Step>
+</Steps>
+
+## Runner requirements
+
+Custom runners must:
+
+1. **Expose a port**: Default is 8000, configurable via `PORT` environment variable
+2. **Accept build artifacts**: Working directory is `/app`
+3. **Support signals**: Handle `SIGTERM` for graceful shutdown
+4. **Run as non-root**: For security (UID/GID will be set by DevPush)
+
+## Performance tuning
+
+### Resource limits
+
+Configure CPU and memory limits in `.env`:
+
+```bash
+# Default limits per deployment
+DEFAULT_CPUS=0.5
+DEFAULT_MEMORY_MB=2048
+
+# Maximum user can override
+MAX_CPUS=4.0
+MAX_MEMORY_MB=8192
+```
+
+### Build cache
+
+DevPush caches Docker layers between builds:
+
+- **Python**: pip cache persists
+- **Node.js**: node_modules cached if package.json unchanged
+- **PHP**: Composer cache persists
+
+### Parallel builds
+
+Multiple deployments can build concurrently (limited by server resources).
+
+## Troubleshooting
+
+### "Runner image not found"
+
+**Cause**: Docker cannot pull the runner image.
+
+**Solution**:
+1. Verify image exists:
+   ```bash
+   docker pull ghcr.io/devpushhq/runner-python-3.12:1.0.1
+   ```
+2. Check registry authentication if using private images
+3. Verify network connectivity
+
+### Build command fails
+
+**Cause**: Missing dependencies or incorrect command.
+
+**Solution**:
+1. Check deployment logs for error details
+2. Test build command locally:
+   ```bash
+   docker run -it --rm ghcr.io/devpushhq/runner-python-3.12:1.0.1 bash
+   cd /app
+   # Run your build command
+   ```
+3. Update build command in project settings
+
+### Application not starting
+
+**Cause**: Start command incorrect or port mismatch.
+
+**Solution**:
+1. Ensure app listens on `0.0.0.0:$PORT`:
+   ```python
+   port = int(os.environ.get('PORT', 8000))
+   app.run(host='0.0.0.0', port=port)
+   ```
+2. Check runtime logs for errors
+3. Verify start command syntax
+
+### Custom runner not appearing
+
+**Cause**: Syntax error in `overrides.json` or DevPush not restarted.
+
+**Solution**:
+1. Validate JSON:
+   ```bash
+   jq . /var/lib/devpush/registry/overrides.json
+   ```
+2. Restart DevPush:
+   ```bash
+   sudo systemctl restart devpush.service
+   ```
+3. Check app logs:
+   ```bash
+   sudo journalctl -u devpush.service -f
+   ```
+
+## Best practices
+
+### Keep images small
+
+- Use slim base images (e.g., `python:3.12-slim`)
+- Clean up package manager caches
+- Use multi-stage builds for compiled languages
+
+### Pin versions
+
+```dockerfile
+# ❌ Bad - uses latest
+FROM python
+
+# ✅ Good - pinned version
+FROM python:3.12.1-slim
+```
+
+### Optimize build commands
+
+```bash
+# ❌ Bad - installs dev dependencies
+pip install -r requirements.txt
+
+# ✅ Good - production only
+pip install --no-dev -r requirements.txt
+```
+
+### Use .dockerignore
+
+Exclude unnecessary files from build context:
+
+```dockerignore
+.git
+.env
+node_modules
+*.log
+__pycache__
+```
+
+## Next steps
+
+- [Configure environment variables](/guides/environment-variables)
+- [Set up custom domains](/guides/custom-domains)
+- [Learn about deployments](/concepts/deployments)

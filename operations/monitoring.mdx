@@ -1,0 +1,331 @@
+---
+title: Monitoring
+description: Monitor DevPush deployments, logs, and system health
+---
+
+DevPush provides multiple monitoring capabilities to track deployments, access logs, and verify system health.
+
+## Log Aggregation with Loki
+
+DevPush uses Grafana Loki for centralized log aggregation. All deployment logs (build and runtime) are automatically collected and queryable.
+
+### How Logs Flow
+
+1. **Runner containers** write logs to local files
+2. **Alloy** (telemetry agent) tails container logs and ships them to Loki
+3. **App** queries Loki via `/loki/api/v1/query_range` endpoint
+4. **Users** receive logs through Server-Sent Events (SSE) streams
+
+### Querying Logs
+
+The `LokiService` (`app/services/loki.py`) provides a Python interface for log queries:
+
+```python
+await loki_service.get_logs(
+    project_id="project-id",
+    deployment_id="deployment-id",  # Optional: filter by deployment
+    environment_id="prod",           # Optional: filter by environment
+    branch="main",                   # Optional: filter by branch
+    keyword="error",                 # Optional: search for text
+    limit=100,
+    start_timestamp="1234567890000000000",  # nanoseconds
+    end_timestamp="1234567890000000000"
+)
+```
+
+### Log Labels
+
+All deployment logs include these labels:
+- `project_id`: Project identifier
+- `deployment_id`: Deployment identifier
+- `environment_id`: Environment identifier
+- `branch`: Git branch name
+- `stream`: stdout or stderr
+
+### Accessing Loki Directly
+
+Loki is available at `http://loki:3100` within the Docker network:
+
+```bash
+# Query logs using curl
+curl 'http://loki:3100/loki/api/v1/query_range' \
+  --data-urlencode 'query={project_id="my-project"}' \
+  --data-urlencode 'limit=100'
+```
+
+## Real-Time Log Streaming
+
+Deployment logs are streamed to users via Server-Sent Events (SSE).
+
+### SSE Endpoints
+
+**Deployment Logs** (`app/routers/event.py:29`)
+```
+GET /{team_id}/projects/{project_id}/deployments/{deployment_id}/events
+```
+
+Features:
+- Streams build and runtime logs in real-time
+- Automatically reconnects with `Last-Event-ID` header
+- Includes grace period after deployment conclusion
+- Events: `deployment_log`, `deployment_concluded`, `deployment_log_closed`
+
+**Project Updates** (`app/routers/event.py:174`)
+```
+GET /{team_id}/projects/{project_id}/events
+```
+
+Features:
+- Streams all deployment status changes for a project
+- Events: `deployment_creation`, `deployment_status_update`, `deployment_rollback`
+
+### Log Stream Configuration
+
+Environment variables controlling log streaming:
+
+```bash
+# Grace window for log streaming (seconds)
+LOG_STREAM_GRACE_SECONDS=5
+
+# Container deletion grace period (seconds)
+CONTAINER_DELETE_GRACE_SECONDS=3
+```
+
+This ensures logs are fully shipped to Loki before containers are removed.
+
+## Deployment Monitoring
+
+The monitor worker (`app/workers/monitor.py`) continuously checks deployment health.
+
+### Monitor Behavior
+
+- **Polling interval**: Every 2 seconds
+- **Probe target**: Container IP on port 8000 over `devpush_runner` network
+- **Timeout**: Configurable via `DEPLOYMENT_TIMEOUT_SECONDS` (default: 300s)
+
+### Monitor Flow
+
+1. Query database for deployments with `status=deploy` and `container_status=running`
+2. For each deployment:
+   - Check if deployment has exceeded timeout
+   - Get container status from Docker API
+   - Perform HTTP probe on port 8000
+3. Based on results:
+   - **Success**: HTTP 200 response → enqueue `finalize_deployment`
+   - **Container exited**: Exit code detected → enqueue `fail_deployment` with reason
+   - **Timeout**: Exceeded limit → enqueue `fail_deployment`
+
+### Container Exit Codes
+
+The monitor interprets container exit codes (`app/workers/monitor.py:94`):
+
+- **0**: Unexpected exit (app shouldn't exit on its own)
+- **1**: Startup crash (check logs for errors)
+- **137**: Killed (OOM or manual stop)
+- **Other**: Generic failure
+
+## Health Checks
+
+### Application Health
+
+DevPush app provides a health endpoint:
+
+```bash
+curl http://localhost/health
+```
+
+Check app health during startup:
+
+```bash
+# Wait for app to be healthy (used by scripts/start.sh:64)
+docker inspect --format '{{.State.Health.Status}}' <container_id>
+```
+
+Possible states:
+- `starting`: Container is starting
+- `healthy`: App is ready
+- `unhealthy`: Health check failed
+
+### Service Health Checks
+
+Docker Compose includes health checks for core services. View status:
+
+```bash
+./scripts/compose.sh ps
+```
+
+### Worker Health
+
+Check ARQ worker status:
+
+```bash
+# Jobs worker
+./scripts/compose.sh exec worker-jobs arq --check
+
+# Monitor worker (check if process is running)
+./scripts/compose.sh exec worker-monitor ps aux | grep monitor
+```
+
+## Container Status
+
+### List Running Deployments
+
+```bash
+# All DevPush containers
+docker ps --filter "label=com.docker.compose.project=devpush"
+
+# Runner containers only
+docker ps --filter "label=devpush.deployment.id"
+```
+
+### Check Specific Deployment
+
+```bash
+# Get container ID from deployment
+DEPLOYMENT_ID="abc123"
+CONTAINER_ID=$(docker ps -q --filter "label=devpush.deployment.id=$DEPLOYMENT_ID")
+
+# Inspect container
+docker inspect $CONTAINER_ID
+
+# View logs
+docker logs $CONTAINER_ID --tail 100 -f
+```
+
+### Container Resource Usage
+
+```bash
+# Real-time stats
+docker stats
+
+# Stats for specific container
+docker stats <container_id>
+```
+
+## Stack Status
+
+### Quick Status Check
+
+```bash
+./scripts/status.sh
+```
+
+Output includes:
+- Stack status (up/down)
+- Environment (production/development)
+- App directory
+- Data directory
+- Container list with status and ports
+
+### Detailed Service Status
+
+```bash
+# All services
+./scripts/compose.sh ps
+
+# Specific service
+./scripts/compose.sh ps app
+
+# With formatting
+./scripts/compose.sh ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}"
+```
+
+## Observability Architecture
+
+From `ARCHITECTURE.md:189`:
+
+- **Logs**: Runner containers → Alloy → Loki; app queries Loki and streams via SSE
+- **Status**: Redis Streams power SSE for project and deployment updates
+- **Health**: App `/health` endpoint; ARQ `--check`; Docker Compose healthchecks
+
+### Redis Streams
+
+Real-time updates use Redis Streams:
+
+```bash
+# Monitor project updates
+redis-cli XREAD BLOCK 5000 STREAMS stream:project:<project-id>:updates $
+
+# Monitor deployment status
+redis-cli XREAD BLOCK 5000 STREAMS stream:project:<project-id>:deployment:<deployment-id>:status $
+```
+
+Stream message format:
+```json
+{
+  "event_type": "deployment_status_update",
+  "project_id": "proj-123",
+  "deployment_id": "dep-456",
+  "deployment_status": "succeeded",
+  "timestamp": "2026-03-04T12:34:56.789Z"
+}
+```
+
+## Monitoring Configuration
+
+### Environment Variables
+
+```bash
+# Deployment timeout (seconds)
+DEPLOYMENT_TIMEOUT_SECONDS=300
+
+# Container deletion grace (seconds)
+CONTAINER_DELETE_GRACE_SECONDS=3
+
+# Log stream grace (seconds)
+LOG_STREAM_GRACE_SECONDS=5
+
+# Logging level
+LOG_LEVEL=WARNING
+```
+
+### Database Schema Check
+
+The monitor worker waits for migrations before querying (`app/workers/monitor.py:169`):
+
+```python
+# Checks for alembic_version table
+schema_ready = await db.run_sync(
+    lambda sync_session: inspect(sync_session.connection()).has_table("alembic_version")
+)
+```
+
+This prevents log spam during initial setup.
+
+## Troubleshooting Monitoring
+
+### Logs Not Appearing
+
+1. Check Alloy is running:
+   ```bash
+   ./scripts/compose.sh ps alloy
+   ```
+
+2. Check Loki is accessible:
+   ```bash
+   curl http://loki:3100/ready
+   ```
+
+3. Verify container labels exist:
+   ```bash
+   docker inspect <container_id> | grep -A5 Labels
+   ```
+
+### SSE Stream Disconnects
+
+- Streams expire after 900 seconds (15 minutes)
+- Clients should reconnect with `Last-Event-ID` header
+- Check Redis connectivity if streams fail
+
+### Monitor Worker Not Running
+
+```bash
+# Check worker status
+./scripts/compose.sh ps worker-monitor
+
+# View worker logs
+./scripts/compose.sh logs -f worker-monitor
+
+# Restart worker
+./scripts/restart.sh --components worker-monitor
+```

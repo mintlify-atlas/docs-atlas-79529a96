@@ -1,80 +1,251 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get DevPush running and deploy your first app in under 10 minutes
 ---
 
-## Get started in three steps
+This guide will help you get DevPush installed and deploy your first application. By the end, you'll have a working deployment platform running on your own server.
 
-Get your documentation site running locally and make your first customization.
+<Warning>
+  Supported on Ubuntu 20.04+ and Debian 11+. Other distributions may work but aren't officially supported.
+</Warning>
 
-### Step 1: Set up your local environment
+## Prerequisites
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+Before you begin, ensure you have:
 
-### Step 2: Deploy your changes
+- A fresh Ubuntu 20.04+ or Debian 11+ server with root/sudo access
+- A domain name (e.g., `example.com`) with DNS access
+- A GitHub account
+- An email service (Resend API key or SMTP credentials)
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+## Step 1: Install DevPush
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+Run the installation script on your server:
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+```bash
+curl -fsSL https://install.devpu.sh | sudo bash
+```
 
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+The installer will:
+- Install Docker and required dependencies
+- Create a system user (`devpush`)
+- Clone the DevPush repository
+- Generate secure secrets
+- Set up systemd service
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  The installation script automatically detects the latest stable version and installs it. The process typically takes 2-3 minutes.
 </Note>
+
+## Step 2: Create a GitHub App
+
+DevPush uses a GitHub App for authentication and repository access.
+
+1. Follow the guide at [devpu.sh/docs/guides/github-app](https://devpu.sh/docs/guides/github-app)
+2. Save the following credentials:
+   - App ID
+   - App Name
+   - Private Key (PEM format)
+   - Webhook Secret
+   - Client ID
+   - Client Secret
+
+<Tip>
+  Keep your GitHub App credentials in a secure location. You'll need them in the next step.
+</Tip>
+
+## Step 3: Configure Environment Variables
+
+Edit the environment file with your configuration:
+
+```bash
+sudo nano /var/lib/devpush/.env
+```
+
+Fill in the required values:
+
+<CodeGroup>
+```bash Domains & SSL
+# Your main domain for the DevPush application
+APP_HOSTNAME=devpush.example.com
+
+# Wildcard domain for deployments (e.g., *.deploy.example.com)
+DEPLOY_DOMAIN=deploy.example.com
+
+# Email for Let's Encrypt SSL certificate notifications
+LE_EMAIL=admin@example.com
+```
+
+```bash GitHub App
+# Credentials from Step 2
+GITHUB_APP_ID=123456
+GITHUB_APP_NAME=my-devpush-app
+GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\nYour\nPrivate\nKey\nHere\n-----END RSA PRIVATE KEY-----"
+GITHUB_APP_WEBHOOK_SECRET=your-webhook-secret
+GITHUB_APP_CLIENT_ID=Iv1.abc123def456
+GITHUB_APP_CLIENT_SECRET=your-client-secret
+```
+
+```bash Email (Resend)
+# If using Resend for email delivery
+EMAIL_SENDER_ADDRESS=noreply@example.com
+RESEND_API_KEY=re_abc123def456
+```
+
+```bash Email (SMTP)
+# Alternative: Use SMTP instead of Resend
+EMAIL_SENDER_ADDRESS=noreply@example.com
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=your-smtp-username
+SMTP_PASSWORD=your-smtp-password
+```
+</CodeGroup>
+
+<Note>
+  The installer automatically generates `SECRET_KEY`, `ENCRYPTION_KEY`, `POSTGRES_PASSWORD`, and `SERVER_IP`. You don't need to modify these values.
+</Note>
+
+## Step 4: Configure DNS
+
+Set up two DNS A records pointing to your server's IP address:
+
+<Steps>
+  <Step title="App hostname">
+    Create an A record for your main domain:
+    ```
+    A    devpush.example.com    →    YOUR_SERVER_IP
+    ```
+  </Step>
+  
+  <Step title="Wildcard deployment domain">
+    Create a wildcard A record for deployments:
+    ```
+    A    *.deploy.example.com    →    YOUR_SERVER_IP
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  Wait for DNS propagation before starting the service. This typically takes a few minutes but can take up to 24 hours.
+</Warning>
+
+## Step 5: Start DevPush
+
+Start the DevPush service:
+
+```bash
+sudo systemctl start devpush.service
+```
+
+Check the status:
+
+```bash
+sudo systemctl status devpush.service
+```
+
+You should see "active (running)" in the output.
+
+<Tip>
+  You can view real-time logs with: `sudo journalctl -u devpush.service -f`
+</Tip>
+
+## Step 6: Access DevPush
+
+Open your browser and navigate to your app hostname:
+
+```
+https://devpush.example.com
+```
+
+You should see the DevPush login page. Sign in with your GitHub account.
+
+## Step 7: Deploy Your First App
+
+<Steps>
+  <Step title="Create a team">
+    After logging in, create a team for organizing your projects.
+  </Step>
+  
+  <Step title="Add a project">
+    Click "New Project" and connect one of your GitHub repositories.
+  </Step>
+  
+  <Step title="Configure environment">
+    Set up your first environment (e.g., "production") and map it to a branch (e.g., "main").
+  </Step>
+  
+  <Step title="Deploy">
+    Push a commit to the mapped branch or click "Deploy" to trigger your first deployment.
+  </Step>
+  
+  <Step title="Monitor">
+    Watch the real-time build and deployment logs in the DevPush dashboard.
+  </Step>
+</Steps>
+
+## Verification
+
+To verify everything is working:
+
+1. **Check service status**: `sudo systemctl status devpush.service`
+2. **View logs**: `sudo journalctl -u devpush.service -f`
+3. **Access the dashboard**: Visit your `APP_HOSTNAME` in a browser
+4. **Check SSL certificate**: Ensure you see a valid Let's Encrypt certificate
+
+## Common Issues
+
+<AccordionGroup>
+  <Accordion title="Service won't start">
+    Check the logs for errors:
+    ```bash
+    sudo journalctl -u devpush.service -n 50
+    ```
+    Common causes:
+    - Missing or invalid environment variables in `/var/lib/devpush/.env`
+    - DNS not yet propagated
+    - Port 80 or 443 already in use
+  </Accordion>
+  
+  <Accordion title="Can't access the dashboard">
+    - Verify DNS is pointing to your server: `dig +short devpush.example.com`
+    - Check firewall rules allow ports 80 and 443
+    - Ensure the service is running: `sudo systemctl status devpush.service`
+  </Accordion>
+  
+  <Accordion title="GitHub login fails">
+    - Verify GitHub App credentials in `/var/lib/devpush/.env`
+    - Check that the GitHub App callback URL matches your `APP_HOSTNAME`
+    - Ensure the GitHub App is installed on your account/organization
+  </Accordion>
+  
+  <Accordion title="SSL certificate issues">
+    - Verify DNS is propagated: `dig +short devpush.example.com`
+    - Check Let's Encrypt rate limits
+    - Ensure `LE_EMAIL` is set correctly
+    - View Traefik logs: `sudo /opt/devpush/scripts/compose.sh logs traefik`
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation Guide" icon="book" href="/installation">
+    Detailed installation and configuration options
+  </Card>
+  <Card title="Configuration" icon="gear" href="/reference/environment-variables">
+    Advanced configuration and environment variables
+  </Card>
+  <Card title="Create Team" icon="users" href="/concepts/teams">
+    Set up teams and manage permissions
+  </Card>
+  <Card title="Deploy Projects" icon="rocket" href="/concepts/deployments">
+    Learn how to deploy and manage projects
+  </Card>
+</CardGroup>
+
+## Get Help
+
+- [Join Discord](https://devpu.sh/chat) - Chat with the community
+- [Report Issues](https://github.com/hunvreus/devpush/issues) - Report bugs or request features
+- [Documentation](https://devpu.sh/docs) - Browse the full documentation

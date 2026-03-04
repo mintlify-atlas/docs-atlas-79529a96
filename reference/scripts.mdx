@@ -1,0 +1,472 @@
+---
+title: Scripts
+description: Complete reference for all DevPush management scripts
+---
+
+All scripts are located in the `scripts/` directory. In production, use `sudo` when running scripts that modify the system.
+
+## Core Management
+
+### start.sh
+
+Start the DevPush stack or specific components.
+
+```bash
+./scripts/start.sh [OPTIONS]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--components <csv>` | Comma-separated list of services to start (e.g., `app,worker-jobs`) |
+| `--no-migrate` | Skip running database migrations |
+| `--timeout <sec>` | Max seconds to wait for services to be ready |
+| `-v`, `--verbose` | Enable verbose output |
+| `-h`, `--help` | Show help |
+
+**Examples:**
+
+```bash
+# Start all services
+sudo ./scripts/start.sh
+
+# Start only app and workers
+sudo ./scripts/start.sh --components app,worker-jobs,worker-monitor
+
+# Start without running migrations
+sudo ./scripts/start.sh --no-migrate
+```
+
+### stop.sh
+
+Stop the DevPush stack or specific components.
+
+```bash
+./scripts/stop.sh [OPTIONS]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--components <csv>` | Comma-separated list of services to stop |
+| `--hard` | Force stop (equivalent to `docker compose down`) |
+| `-h`, `--help` | Show help |
+
+**Examples:**
+
+```bash
+# Stop all services gracefully
+sudo ./scripts/stop.sh
+
+# Force stop all services
+sudo ./scripts/stop.sh --hard
+
+# Stop specific components
+sudo ./scripts/stop.sh --components app,worker-jobs
+```
+
+### restart.sh
+
+Restart the DevPush stack or specific components.
+
+```bash
+./scripts/restart.sh [OPTIONS]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--components <csv>` | Comma-separated list of services to restart |
+| `--no-migrate` | Skip running database migrations |
+| `-h`, `--help` | Show help |
+
+**Examples:**
+
+```bash
+# Restart all services
+sudo ./scripts/restart.sh
+
+# Restart only the app
+sudo ./scripts/restart.sh --components app
+```
+
+### status.sh
+
+Show the status of all DevPush services.
+
+```bash
+./scripts/status.sh
+```
+
+Displays the running state of all containers in the stack.
+
+## Installation & Updates
+
+### install.sh
+
+Install DevPush on a fresh server. Sets up Docker, creates the service user, clones the repository, and configures systemd.
+
+```bash
+curl -fsSL https://install.devpu.sh | sudo bash
+```
+
+Or with options:
+
+```bash
+sudo ./scripts/install.sh [OPTIONS]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--repo <url>` | Git repository to clone (default: `https://github.com/hunvreus/devpush.git`) |
+| `--ref <ref>` | Git ref (branch/tag/commit) to install (default: latest stable tag) |
+| `--yes`, `-y` | Non-interactive mode, proceed without prompts |
+| `--no-telemetry` | Do not send installation telemetry |
+| `-v`, `--verbose` | Enable verbose output for debugging |
+| `-h`, `--help` | Show help |
+
+**Examples:**
+
+```bash
+# Install latest stable version
+curl -fsSL https://install.devpu.sh | sudo bash
+
+# Install specific version
+sudo ./scripts/install.sh --ref 1.2.3
+
+# Install from custom repo
+sudo ./scripts/install.sh --repo https://github.com/myorg/devpush.git --ref main
+```
+
+### update.sh
+
+Update DevPush to a new version. Supports zero-downtime blue-green rollouts for app/worker updates.
+
+```bash
+sudo ./scripts/update.sh [OPTIONS]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--ref <tag>` | Git tag to update to (default: latest stable tag) |
+| `--all` | Update app and workers (`app,worker-jobs,worker-monitor`) |
+| `--components <csv>` | Comma-separated list of services to update |
+| `--full` | Full stack update (causes downtime) |
+| `--backup` | Create a backup before applying the update |
+| `--no-migrate` | Do not run database migrations after update |
+| `--no-telemetry` | Do not send update telemetry |
+| `--yes`, `-y` | Non-interactive mode |
+| `-v`, `--verbose` | Enable verbose output |
+| `-h`, `--help` | Show help |
+
+**Valid components:**
+- `app` — FastAPI application
+- `worker-jobs` — Background job worker
+- `worker-monitor` — Deployment monitor worker
+- `pgsql` — PostgreSQL database
+- `redis` — Redis cache/queue
+- `traefik` — Reverse proxy
+- `loki` — Log aggregation
+- `alloy` — Telemetry agent
+
+**Update Scopes:**
+
+By default, `update.sh` only updates the `app` component to minimize service disruption:
+
+- **App only (default):** Zero-downtime blue-green rollout
+- **`--all`:** Updates app and workers with rolling restarts
+- **`--components`:** Update specific services
+- **`--full`:** Full stack down/up (causes downtime)
+
+**Examples:**
+
+```bash
+# Update to latest stable version (app only)
+sudo ./scripts/update.sh
+
+# Update app and workers
+sudo ./scripts/update.sh --all
+
+# Update to specific version with backup
+sudo ./scripts/update.sh --ref 1.2.3 --backup
+
+# Full stack update (with downtime)
+sudo ./scripts/update.sh --full
+
+# Update only Traefik
+sudo ./scripts/update.sh --components traefik
+```
+
+### uninstall.sh
+
+Uninstall DevPush from the server. Stops services, optionally creates a backup, and removes all installation files.
+
+```bash
+sudo ./scripts/uninstall.sh [OPTIONS]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--yes` | Skip confirmation prompts |
+| `--skip-backup` | Do not create a backup before uninstalling |
+| `--no-telemetry` | Do not send uninstall telemetry |
+| `-v`, `--verbose` | Enable verbose output |
+| `-h`, `--help` | Show help |
+
+**Examples:**
+
+```bash
+# Uninstall with backup
+sudo ./scripts/uninstall.sh
+
+# Uninstall without backup
+sudo ./scripts/uninstall.sh --skip-backup --yes
+```
+
+## Backup & Restore
+
+### backup.sh
+
+Create a complete backup of DevPush including data directory, database dump, and metadata.
+
+```bash
+./scripts/backup.sh [OPTIONS]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--output <file>` | Path for the resulting `.tar.gz` archive (default: `$DATA_DIR/backups/devpush-<timestamp>.tar.gz`) |
+| `-v`, `--verbose` | Enable verbose output |
+| `-h`, `--help` | Show help |
+
+**What's included:**
+- Complete copy of `$DATA_DIR` (uploads, configs, logs)
+- PostgreSQL database dump (`pg_dump`)
+- Metadata (timestamp, environment, paths, host info)
+
+**Examples:**
+
+```bash
+# Create backup with default location
+sudo ./scripts/backup.sh
+
+# Create backup to specific location
+sudo ./scripts/backup.sh --output /backups/devpush-manual.tar.gz
+
+# Verbose output
+sudo ./scripts/backup.sh --verbose
+```
+
+### restore.sh
+
+Restore DevPush from a backup archive created by `backup.sh`.
+
+```bash
+./scripts/restore.sh --archive <file> [OPTIONS]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--archive <file>` | Backup archive to restore (required) |
+| `--no-db` | Skip restoring the database |
+| `--no-data` | Skip restoring the data directory |
+| `--no-code` | Skip restoring the code repository |
+| `--no-restart` | Skip restarting the stack after restore |
+| `--no-backup` | Skip creating a backup before restoring |
+| `--remove-runners` | Remove runner containers before restoring |
+| `--timeout <sec>` | Max seconds to wait for PostgreSQL to be ready (default: `60`) |
+| `--yes` | Skip confirmation prompts |
+| `-v`, `--verbose` | Enable verbose output |
+| `-h`, `--help` | Show help |
+
+**Examples:**
+
+```bash
+# Full restore
+sudo ./scripts/restore.sh --archive /backups/devpush-20260304.tar.gz
+
+# Restore only database
+sudo ./scripts/restore.sh --archive backup.tar.gz --no-data --no-code
+
+# Restore without creating pre-restore backup
+sudo ./scripts/restore.sh --archive backup.tar.gz --no-backup --yes
+```
+
+## Database Management
+
+### db-migrate.sh
+
+Apply pending Alembic database migrations.
+
+```bash
+./scripts/db-migrate.sh [OPTIONS]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--timeout <sec>` | Max seconds to wait for PostgreSQL to be ready |
+| `-h`, `--help` | Show help |
+
+**Examples:**
+
+```bash
+# Run migrations
+./scripts/db-migrate.sh
+
+# Run migrations with custom timeout
+./scripts/db-migrate.sh --timeout 120
+```
+
+### db-generate.sh
+
+Generate a new Alembic migration after modifying SQLAlchemy models.
+
+```bash
+./scripts/db-generate.sh
+```
+
+Prompts for a migration message and creates a new migration file in `app/migrations/versions/`.
+
+**Example:**
+
+```bash
+./scripts/db-generate.sh
+# Enter migration message: add user avatar field
+# Creates: app/migrations/versions/abc123_add_user_avatar_field.py
+```
+
+## Development & Utilities
+
+### clean.sh
+
+Stop services and remove all Docker resources and/or data directory. Use with caution!
+
+```bash
+./scripts/clean.sh [OPTIONS]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--keep-docker` | Keep Docker resources (containers, volumes, networks, images) |
+| `--keep-data` | Keep data directory |
+| `--yes` | Skip confirmation prompts |
+| `-h`, `--help` | Show help |
+
+**Examples:**
+
+```bash
+# Remove everything (requires confirmation)
+./scripts/clean.sh
+
+# Remove only data directory
+./scripts/clean.sh --keep-docker
+
+# Remove only Docker resources
+./scripts/clean.sh --keep-data
+```
+
+### compose.sh
+
+Docker Compose wrapper with correct file and environment configuration.
+
+```bash
+./scripts/compose.sh [COMPOSE_ARGS]
+```
+
+**Examples:**
+
+```bash
+# View logs
+./scripts/compose.sh logs -f app
+
+# Execute command in container
+./scripts/compose.sh exec app python -m app.cli user-list
+
+# View service status
+./scripts/compose.sh ps
+
+# Rebuild a service
+./scripts/compose.sh build app
+```
+
+## Environment Detection
+
+All scripts automatically detect the environment:
+
+- **Production:** Detected via systemd or when running with sudo
+- **Development:** Detected on macOS or when `DEVPUSH_ENV=development`
+
+Scripts adjust paths and behaviors accordingly:
+
+| Environment | Code Path | Data Path | Env File |
+|-------------|-----------|-----------|----------|
+| Production  | `/opt/devpush` | `/var/lib/devpush` | `/var/lib/devpush/.env` |
+| Development | Project root | `./data` | `./data/.env` |
+
+## Common Script Patterns
+
+### Running in Production
+
+Most management scripts require root privileges in production:
+
+```bash
+sudo ./scripts/start.sh
+sudo ./scripts/update.sh
+sudo ./scripts/backup.sh
+```
+
+### Component Targeting
+
+Many scripts support `--components` to target specific services:
+
+```bash
+# Restart only the app
+sudo ./scripts/restart.sh --components app
+
+# Update app and workers
+sudo ./scripts/update.sh --components app,worker-jobs,worker-monitor
+```
+
+### Verbose Mode
+
+Add `-v` or `--verbose` to any script for detailed output:
+
+```bash
+sudo ./scripts/start.sh --verbose
+```
+
+### Non-Interactive Mode
+
+Use `--yes` or `-y` to skip confirmation prompts (useful for automation):
+
+```bash
+sudo ./scripts/update.sh --yes
+sudo ./scripts/clean.sh --yes
+```
+
+## Script Logs
+
+Scripts write logs to temporary locations:
+
+- Installation: `/tmp/devpush-install.log`
+- Updates: `/tmp/devpush-update.log`
+- General errors: Captured in `$SCRIPT_ERR_LOG`
+
+Check these files when troubleshooting issues.
